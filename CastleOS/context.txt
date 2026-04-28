@@ -1,0 +1,292 @@
+CastleOS session context
+Updated: 2026-04-28
+
+User goals from this chat
+- Fix the x86_64 build/link failure around shell commands.
+- Add a shutdown command.
+- Make disk reporting show available targets and locations.
+- Make install do something real instead of only flipping flags.
+- Make CastleBash meaningfully different from the classic shell.
+- Hide commands from the classic shell that should only exist after install.
+- Add more Bash-like commands to CastleBash.
+- Improve keyboard support:
+  - shift and caps behavior
+  - symbols on number keys and punctuation
+  - arrow keys and other non-printing keys
+  - editable shell input with a movable text cursor
+- User also asked for actual Wi-Fi, storage, and other drivers needed for a truly real install.
+- Latest direct request: implement a wireless driver.
+- New concrete scope from the user: scan for the Wi-Fi card and then let the user choose the Wi-Fi driver.
+- Latest direct request: show USB-connected install devices in the install target list, and also implement a Wi-Fi data path.
+- Latest direct requests:
+  - add a packet driver for Wi-Fi
+  - let the user choose drivers for everything they wish
+  - update this context file regularly on every prompt
+- New latest direct request:
+  - the packet driver is not loaded
+  - configurable commands should support a numbered interactive flow when invoked with `config`
+  - after finishing, run the Docker build flow with `castleos-buildenv`
+  - then boot the ISO in QEMU with `-device e1000,netdev=n0`
+  - test what works, fix what does not, and write `checklist.txt`
+- Newest prompt update:
+  - after all of this, test again with the same Docker/QEMU method
+  - also add ssh
+- Latest reminder from the user:
+  - keep updating this context file
+- User asked to keep this file updated every prompt so context survives better if the chat limit is hit.
+
+Important environment context
+- Working directory: /Users/barnabyraynes/Downloads/CastleOS
+- The local machine can compile and link the kernel, but local ISO packaging fails because grub-mkrescue is not installed outside Docker.
+- README says the intended build flow is:
+  1) docker run --rm -it -v $(pwd):/root/env myos-buildenv
+  2) make build-x86_64 inside the container
+- A direct docker run from the assistant was blocked by sandbox policy because it mounted the writable workspace into an unverified image.
+
+What was broken originally
+- Linker error:
+  - undefined reference to cmd_drivers
+  - undefined reference to cmd_pci
+- That happened because shell.c declared those commands and referenced them in the command table, but the function bodies were missing.
+
+What has already been changed in the repo
+- src/impl/x86_64/shell.c
+  - Added cmd_drivers implementation.
+  - Added cmd_pci implementation.
+  - Added cmd_shutdown implementation using common emulator poweroff ports.
+  - Added install target modeling so disk/install output is more concrete:
+    - /dev/ram0 target
+    - modeled /dev/sda and /dev/sda1 when a storage controller is detected
+  - Added install image manifest capture so install writes a structured image description into the chosen target record instead of only setting booleans.
+  - Added disk inventory/status/show/rescan behavior.
+  - install now validates the selected target against the visible disk inventory before proceeding.
+- readme.md
+  - Updated to match the newer install/disk/shutdown behavior.
+
+Verification completed so far
+- make build-x86_64 now gets through compilation and link successfully on the host.
+- The remaining host-side failure is:
+  - /bin/sh: grub-mkrescue: command not found
+- That means the original linker issue is fixed.
+
+New shell/Bash refactor already started but not finished yet
+- src/impl/x86_64/shell.c
+  - Increased SHELL_MAX_NODES from 32 to 64.
+  - Added SHELL_HISTORY_SIZE.
+  - Increased INSTALL_MANIFEST_SIZE from 8192 to 16384.
+  - Added command mode flags:
+    - COMMAND_SHELL_CLASSIC
+    - COMMAND_SHELL_BASH
+    - COMMAND_REQUIRES_INSTALL
+  - Expanded struct Command to include flags.
+  - Added history buffer globals.
+  - Added forward declarations for:
+    - VFS helpers for copy/move/delete/path creation
+    - shell history recording
+    - command visibility helpers
+    - new Bash-like commands
+  - Updated the command table to start separating classic shell commands from CastleBash-only commands.
+- This part is incomplete and still needs implementation work before the tree is build-safe again.
+
+Keyboard/input work completed in this pass
+- src/intf/keyboard.h
+  - Replaced the old char keyboard_getchar() interface with:
+    - special key enum values
+    - int keyboard_getkey()
+- src/impl/x86_64/keyboard.c
+  - Replaced the old flat scancode table with a real polled key decoder.
+  - Added:
+    - shift handling
+    - caps lock handling
+    - symbol output on number/punctuation keys
+    - extended-key handling for arrows, home, end, and delete
+- src/intf/print.h and src/impl/x86_64/print.c
+  - Added cursor getter/setter helpers and direct character placement helpers so shell input can be re-rendered in place.
+- src/impl/x86_64/shell.c
+  - Migrated shell input off keyboard_getchar() onto keyboard_getkey().
+  - Added in-place line editing for shell input:
+    - left/right movement
+    - home/end
+    - delete
+    - in-line insertion
+    - up/down history recall
+  - Password entry now uses the same editable input path with masking.
+  - nano was migrated to the new keyboard API for enter/backspace/escape/printable keys.
+
+Classic shell vs CastleBash split status
+- src/impl/x86_64/shell.c
+  - struct Command now carries visibility/install flags.
+  - Classic shell help only shows commands valid in the classic shell.
+  - CastleBash-only commands are hidden until install.
+  - If a user tries a Bash-only command from the classic shell, the shell now points them toward install or launching CastleBash.
+  - Added more Bash-like commands:
+    - cat
+    - touch
+    - mkdir
+    - rm
+    - cp
+    - mv
+    - whoami
+    - uname
+    - history
+    - hostname
+  - Added VFS helpers to support copy/move/delete and mkdir -p behavior.
+
+Known current architectural limits
+- Actual Wi-Fi is not implemented.
+  - network.c currently has a real RTL8139 Ethernet packet driver.
+  - network_wifi_connect() only stores an SSID/profile and reports that a wireless driver is not implemented.
+  - There is no chipset-specific wireless driver or firmware loader in the repo yet.
+  - There is also no in-repo 802.11 MAC/auth/association stack, scan path, or chipset-specific initialization path for any Wi-Fi hardware.
+  - This means "implement wireless driver" is not one generic change here; it requires choosing a concrete wireless chipset family and building to that hardware.
+- Actual persistent disk install is not implemented at the block-driver level.
+  - drivers.c can detect storage controllers.
+  - There is no ATA, AHCI, or NVMe block driver yet.
+  - The current install target model is more honest and useful than before, but it is still not a real on-disk bootable installation path.
+- Keyboard input is still the old simple driver until keyboard.c and shell.c are finished.
+
+Current priority at the moment of this update
+1) Keep this file updated.
+2) Reassess Wi-Fi/storage/real-install work honestly based on what is actually in the repo today.
+3) For Wi-Fi, choose one concrete target instead of pretending to support "wireless" generically.
+4) Keep build verification passing after each change.
+
+Wireless assessment from the latest inspection
+- drivers.c detects wireless-class PCI devices and stores first_wireless metadata, but does not initialize any wireless hardware.
+- network.c only initializes RTL8139 Ethernet.
+- The current Wi-Fi path is just:
+  - save SSID/profile
+  - report "wireless driver not implemented yet"
+- A real Wi-Fi implementation would need, at minimum:
+  - one chosen chipset family
+  - chipset register/DMA init
+  - RX/TX ring handling
+  - 802.11 frame handling
+  - scan/auth/assoc logic or a much simpler chosen scope
+  - possibly firmware loading depending on chipset
+
+Latest Wi-Fi improvement completed
+- src/intf/network.h
+  - Added Wi-Fi hardware/driver selection fields to NetworkStatus.
+  - Added APIs for Wi-Fi rescanning and driver-choice querying/selection.
+- src/impl/x86_64/network.c
+  - Added Wi-Fi PCI controller rescan logic.
+  - Added vendor-based driver-choice registry and recommended-driver selection.
+  - Added explicit driver selection state.
+  - network_wifi_state() now reports:
+    - no controller detected
+    - controller detected but no driver selected
+    - driver selected but no profile
+    - profile saved but no actual data path yet
+- src/impl/x86_64/shell.c
+  - Added:
+    - wifi scan
+    - wifi drivers
+    - wifi driver <name>
+    - wifi driver auto
+  - Wi-Fi status now shows detected controller, recommended driver, selected driver, and saved SSID where applicable.
+  - Wi-Fi configuration persistence now records selected driver in /etc/wifi.conf.
+
+Latest USB install-target improvement completed
+- src/intf/drivers.h and src/impl/x86_64/drivers.c
+  - Added PCI USB host-controller detection:
+    - UHCI
+    - OHCI
+    - EHCI
+    - XHCI
+  - Driver status now tracks the first detected USB controller and controller counts.
+- src/impl/x86_64/shell.c
+  - Install-target inventory now includes modeled removable USB targets when a USB host controller is detected:
+    - /dev/usb0
+    - /dev/usb0p1
+  - Driver status output now reports USB controller counts.
+  - drivers command output now shows the first detected USB controller.
+
+Latest driver-selection framework completed
+- src/intf/drivers.h and src/impl/x86_64/drivers.c
+  - Added driver-choice registries for:
+    - network
+    - storage
+    - usb
+  - Added selected-driver and recommended-driver tracking for those subsystems.
+  - Added selection/query APIs for shell use.
+  - Driver choices are inferred from detected hardware, for example:
+    - network: rtl8139, generic-ethernet-pci
+    - storage: ata-pio, ahci, nvme, usb-storage, generic-storage-pci
+    - usb: xhci, ehci, ohci, uhci, generic-usb-host
+- src/intf/network.h and src/impl/x86_64/network.c
+  - Added stable accessors for selected/recommended Wi-Fi driver names.
+- src/impl/x86_64/shell.c
+  - drivers command now supports:
+    - drivers status
+    - drivers rescan
+    - drivers list
+    - drivers list <network|wifi|storage|usb>
+    - drivers choose <subsystem> <driver>
+    - drivers auto <subsystem>
+  - Driver preferences are now persisted into /etc/drivers.conf.
+  - Wi-Fi driver persistence is unified with the general driver-preference persistence path.
+  - Driver status output now includes current selections for net/wifi/storage/usb.
+
+Current Wi-Fi data-path blocker
+- The kernel can now:
+  - detect a Wi-Fi PCI controller
+  - recommend possible driver families
+  - let the user select a driver profile
+  - persist driver choices for every major detected subsystem
+- But it still cannot send or receive real Wi-Fi traffic because there is no chipset-specific TX/RX implementation yet.
+- This next step requires choosing one concrete Wi-Fi chipset family or exact PCI vendor/device ID.
+- The assistant has now explicitly asked for either:
+  - the `wifi scan` / `drivers` vendor+device IDs, or
+  - a target family like `ath9k`, `iwlwifi`, `rtlwifi`, or `mt76`
+  before implementing a real Wi-Fi packet driver.
+
+Latest diagnostic for the current prompt
+- The current packet-driver failure is most likely because the kernel only initializes RTL8139.
+- The requested QEMU run now uses `-device e1000`, so `network.c` will currently detect the NIC but leave `packet_driver_ready = 0`.
+- The shell also needs a new interactive `config` path for configurable commands such as:
+  - `net config`
+  - `wifi config`
+  - `disk config`
+  - `drivers config`
+- After code changes, the user wants:
+  1) Docker build with `docker run --rm -it -v $(pwd):/root/env castleos-buildenv`
+  2) `make build-x86_64` inside Docker
+  3) exit Docker
+  4) boot with QEMU using the generated ISO and an `e1000` NIC
+  5) test and document results in `checklist.txt`
+- Live QEMU testing already found one real regression and fix:
+  - the guest saw `8086:100e` on `0:3.0`
+  - `net status` still showed `Packet driver: not loaded`
+  - QEMU `info pci` showed the `e1000` I/O BAR at PCI BAR1 (`0x14`), not the BAR offset first used in `network.c`
+  - the `e1000` init path was updated to read the correct BAR
+- The next work after that fix is:
+  - rebuild in Docker again
+  - rerun the same QEMU validation
+  - add an SSH command/config surface that matches the repo's real networking limits
+- Since that note:
+  - SSH command/config scaffolding was added in the shell with persisted `ssh.conf` state.
+  - Docker rebuild was rerun successfully after the SSH changes.
+  - Final QEMU verification is in progress and the user reiterated that this file should keep being updated as we go.
+  - Live QEMU checks now confirm:
+    - boot to the CastleOS shell prompt works
+    - `ssh status` works and shows the new SSH state/config surface
+    - `net status` still reports the Intel `8086:100e` NIC but also still reports `Packet driver: not loaded`
+  - The e1000 path was improved with:
+    - correct BAR1 I/O selection
+    - EEPROM MAC fallback
+    but that still did not make the packet driver bind in the latest guest test
+
+Files most relevant right now
+- src/impl/x86_64/shell.c
+- src/impl/x86_64/keyboard.c
+- src/impl/x86_64/print.c
+- src/intf/keyboard.h
+- src/intf/print.h
+- src/impl/x86_64/network.c
+- src/impl/x86_64/drivers.c
+- readme.md
+
+User preference note
+- Keep updating this file as the conversation progresses so the work survives context pressure better.
+- Update this file on every new user prompt, not just at major milestones.

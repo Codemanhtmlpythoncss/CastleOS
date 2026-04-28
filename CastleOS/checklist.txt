@@ -1,0 +1,123 @@
+CastleOS checklist
+Updated: 2026-04-28
+
+Verified working
+- Docker build flow
+  - Ran: docker run --rm -it -v $(pwd):/root/env castleos-buildenv
+  - Then ran inside Docker: make build-x86_64
+  - Result: build completed and wrote dist/x86_64/CastleOS.iso
+- QEMU boot with e1000 test method
+  - Ran: qemu-system-x86_64 -drive file=dist/x86_64/CastleOS.iso,file.locking=off,format=raw,media=cdrom,readonly=on -boot d -netdev user,id=n0 -device e1000,netdev=n0
+  - Result: CastleOS booted to the shell prompt
+- Shell boot prompt
+  - Result: CastleOS:/home> prompt appeared in QEMU
+- ssh status command
+  - Result: works in the guest and shows:
+    - SSH enabled/disabled state
+    - remote user
+    - port
+    - last host
+    - host key fingerprint
+    - honest transport status
+- SSH configuration persistence
+  - Result: /etc/ssh.conf is created and updated by the shell
+- Numbered config flows added
+  - Result: implemented for:
+    - net config
+    - wifi config
+    - disk config
+    - drivers config
+    - ssh config
+
+Known not working
+- e1000 packet driver binding
+  - Guest detects Intel 8086:100e at 0:3.0
+  - net status still reports:
+    - Network: network device found, no packet driver for it yet
+    - Packet driver: not loaded
+- ping over e1000
+  - Blocked because the e1000 packet driver is still not active
+- Real SSH transport
+  - The ssh command surface exists, but TCP/IP and SSH session transport are not implemented yet
+- Real WiFi data path
+  - Detection and driver selection exist, but there is still no working wireless packet/data path
+- Real persistent storage install
+  - Installer writes modeled install state and manifests, but the repo still lacks real ATA/AHCI/NVMe block drivers
+
+Needs user test
+- [ ] net config
+  - Boot the ISO
+  - Run: net config
+  - Try:
+    - 1 for status
+    - 2 for DHCP
+    - 3 for static
+    - 4 for down
+    - 5 for rescan
+  - Result:
+
+- [ ] wifi config
+  - Boot the ISO
+  - Run: wifi config
+  - Try:
+    - 1 for status
+    - 2 for scan
+    - 3 for drivers
+    - 4 for auto driver
+    - 5 for choose driver
+    - 6 for connect
+    - 7 for disconnect
+  - Result:
+
+- [ ] disk config
+  - Boot the ISO
+  - Run: disk config
+  - Try:
+    - 1 for status
+    - 2 to choose a target
+    - 3 to show the current target
+    - 4 to rescan
+  - Result:
+
+- [ ] drivers config
+  - Boot the ISO
+  - Run: drivers config
+  - Try:
+    - 1 for status
+    - 2 for rescan
+    - 3 to list subsystem drivers
+    - 4 for auto driver
+    - 5 to choose a driver
+  - Result:
+
+- [ ] ssh config
+  - Boot the ISO
+  - Run: ssh config
+  - Try:
+    - 1 for status
+    - 2 enable
+    - 3 disable
+    - 4 set port
+    - 5 set host
+    - 6 set remote user
+    - 7 regenerate host key
+  - Result:
+
+- [ ] installer flow
+  - Boot the ISO
+  - Run: install
+  - Confirm:
+    - username/password prompts
+    - target selection
+    - network mode selection
+    - completion summary
+    - CastleBash becomes available after install
+  - Result:
+
+- [ ] ssh connect profile flow
+  - Boot the ISO
+  - Run: ssh connect 10.0.2.2 barnaby
+  - Confirm:
+    - profile is saved
+    - command reports that TCP/IP and SSH transport are not implemented yet
+  - Result:
