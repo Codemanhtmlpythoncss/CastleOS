@@ -7,6 +7,13 @@ static inline uint8_t inb(uint16_t port) {
     return result;
 }
 
+static void keyboard_debounce() {
+    volatile uint32_t i;
+    for (i = 0; i < 100000; i++) {
+        __asm__ volatile("");
+    }
+}
+
 static char normal_table[128] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0,
     0, 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', 0,
@@ -98,6 +105,9 @@ static int translate_extended(uint8_t code) {
 }
 
 int keyboard_getkey() {
+    static uint8_t last_code = 0;
+    static int last_was_press = 0;
+
     while (1) {
         uint8_t scancode;
         uint8_t code;
@@ -136,6 +146,9 @@ int keyboard_getkey() {
 
             translated = translate_extended(code);
             if (translated != KEY_NONE) {
+                last_code = code;
+                last_was_press = 1;
+                keyboard_debounce();
                 return translated;
             }
 
@@ -170,27 +183,47 @@ int keyboard_getkey() {
         }
 
         if (released) {
+            last_was_press = 0;
+            continue;
+        }
+
+        if (code == last_code && last_was_press) {
             continue;
         }
 
         if (code == 0x01) {
+            last_code = code;
+            last_was_press = 1;
+            keyboard_debounce();
             return KEY_ESCAPE;
         }
 
         if (code == 0x0E) {
+            last_code = code;
+            last_was_press = 1;
+            keyboard_debounce();
             return KEY_BACKSPACE;
         }
 
         if (code == 0x0F) {
+            last_code = code;
+            last_was_press = 1;
+            keyboard_debounce();
             return KEY_TAB;
         }
 
         if (code == 0x1C) {
+            last_code = code;
+            last_was_press = 1;
+            keyboard_debounce();
             return KEY_ENTER;
         }
 
         translated = translate_printable(code);
         if (translated != KEY_NONE) {
+            last_code = code;
+            last_was_press = 1;
+            keyboard_debounce();
             return translated;
         }
     }
