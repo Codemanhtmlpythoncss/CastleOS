@@ -2857,9 +2857,9 @@ static void cmd_sysinfo(char* args) {
 
     print_str("Motherboard: ");
     if (driver_status.first_network.present) {
-        print_str("PCI device vendor ");
+        print_str("PCI ");
         print_hex_u16(driver_status.first_network.vendor_id);
-        print_str(" device ");
+        print_str(":");
         print_hex_u16(driver_status.first_network.device_id);
     } else {
         print_str("unknown");
@@ -2887,7 +2887,7 @@ static void cmd_sysinfo(char* args) {
     print_newline();
 
     print_str("WiFi driver: ");
-    print_str(drivers_selected_driver("wifi")[0] ? drivers_selected_driver("wifi") : "not selected");
+    print_str(network_wifi_selected_driver()[0] ? network_wifi_selected_driver() : "not selected");
     print_newline();
 
     print_str("Storage driver: ");
