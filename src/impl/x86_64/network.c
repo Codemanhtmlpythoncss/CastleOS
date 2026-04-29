@@ -27,6 +27,12 @@
 #define PCI_VENDOR_MEDIATEK 0x14C3
 #define PCI_VENDOR_RALINK 0x1814
 #define PCI_VENDOR_REALTEK 0x10EC
+#define MEDIATEK_MT7921_DEVICE_ID 0x7961
+#define MEDIATEK_MT7922_DEVICE_ID 0x7922
+#define MEDIATEK_MT7902_DEVICE_ID 0x7902
+#define REALTEK_RTL8822CE_DEVICE_ID 0xC822
+#define REALTEK_RTL8852BE_DEVICE_ID 0xB852
+#define QUALCOMM_QCA6174_DEVICE_ID 0x003E
 #define RTL8139_RX_BUFFER_SIZE 8192
 #define RTL8139_RX_BUFFER_FULL_SIZE (RTL8139_RX_BUFFER_SIZE + 16 + 1500)
 #define RTL8139_TX_BUFFER_COUNT 4
@@ -123,6 +129,7 @@
 #define NETWORK_PACKET_DRIVER_NONE 0
 #define NETWORK_PACKET_DRIVER_RTL8139 1
 #define NETWORK_PACKET_DRIVER_E1000 2
+#define NETWORK_PACKET_DRIVER_WIFI_SIM 3
 
 struct E1000TxDescriptor {
     uint64_t address;
@@ -173,6 +180,8 @@ static uint8_t e1000_rx_buffers[E1000_RX_DESC_COUNT][E1000_BUFFER_SIZE] __attrib
 static uint8_t e1000_tx_buffers[E1000_TX_DESC_COUNT][E1000_BUFFER_SIZE] __attribute__((aligned(16)));
 
 static void process_incoming_arp(uint8_t* packet, uint16_t length);
+static int wifi_can_use_simulated_link();
+static void enable_wifi_simulated_link();
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -295,12 +304,34 @@ static void add_wifi_driver_option(char* name) {
     status.wifi_driver_option_count++;
 }
 
+static void set_wifi_recommended_driver(char* driver_name) {
+    copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), driver_name);
+}
+
 static int is_wireless_device(uint8_t class_code, uint8_t subclass) {
     return class_code == PCI_CLASS_WIRELESS
         || (class_code == PCI_CLASS_NETWORK && subclass == PCI_SUBCLASS_OTHER_NETWORK);
 }
 
-static void configure_wifi_driver_options(uint16_t vendor_id) {
+static int is_mediatek_mt79xx(uint16_t vendor_id, uint16_t device_id) {
+    if (vendor_id != PCI_VENDOR_MEDIATEK) {
+        return 0;
+    }
+
+    return device_id == MEDIATEK_MT7921_DEVICE_ID
+        || device_id == MEDIATEK_MT7922_DEVICE_ID
+        || device_id == MEDIATEK_MT7902_DEVICE_ID;
+}
+
+static int is_lenovo_14w_wifi_candidate(uint16_t vendor_id, uint16_t device_id) {
+    if (is_mediatek_mt79xx(vendor_id, device_id)) {
+        return 1;
+    }
+
+    return vendor_id == PCI_VENDOR_REALTEK && device_id == REALTEK_RTL8822CE_DEVICE_ID;
+}
+
+static void configure_wifi_driver_options(uint16_t vendor_id, uint16_t device_id) {
     clear_wifi_driver_options();
     status.wifi_recommended_driver[0] = '\0';
 
@@ -309,17 +340,25 @@ static void configure_wifi_driver_options(uint16_t vendor_id) {
     }
 
     if (vendor_id == PCI_VENDOR_ATHEROS || vendor_id == PCI_VENDOR_QUALCOMM_ATHEROS) {
+        if (device_id == QUALCOMM_QCA6174_DEVICE_ID) {
+            add_wifi_driver_option("ath10k");
+            add_wifi_driver_option("ath9k");
+            add_wifi_driver_option("generic-pci-wifi");
+            set_wifi_recommended_driver("ath10k");
+            return;
+        }
+
         add_wifi_driver_option("ath9k");
         add_wifi_driver_option("ath10k");
         add_wifi_driver_option("generic-pci-wifi");
-        copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), "ath9k");
+        set_wifi_recommended_driver("ath9k");
         return;
     }
 
     if (vendor_id == PCI_VENDOR_INTEL) {
         add_wifi_driver_option("iwlwifi");
         add_wifi_driver_option("generic-pci-wifi");
-        copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), "iwlwifi");
+        set_wifi_recommended_driver("iwlwifi");
         return;
     }
 
@@ -327,28 +366,58 @@ static void configure_wifi_driver_options(uint16_t vendor_id) {
         add_wifi_driver_option("b43");
         add_wifi_driver_option("brcmsmac");
         add_wifi_driver_option("generic-pci-wifi");
-        copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), "b43");
+        set_wifi_recommended_driver("b43");
+        return;
+    }
+
+    if (is_mediatek_mt79xx(vendor_id, device_id)) {
+        add_wifi_driver_option("mt7921e");
+        add_wifi_driver_option("mt76");
+        add_wifi_driver_option("lenovo-14w-wifi");
+        add_wifi_driver_option("generic-pci-wifi");
+        set_wifi_recommended_driver("mt7921e");
         return;
     }
 
     if (vendor_id == PCI_VENDOR_MEDIATEK || vendor_id == PCI_VENDOR_RALINK) {
         add_wifi_driver_option("mt76");
         add_wifi_driver_option("generic-pci-wifi");
-        copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), "mt76");
+        set_wifi_recommended_driver("mt76");
         return;
     }
 
     if (vendor_id == PCI_VENDOR_REALTEK) {
+        if (device_id == REALTEK_RTL8822CE_DEVICE_ID) {
+            add_wifi_driver_option("rtw88_8822ce");
+            add_wifi_driver_option("lenovo-14w-wifi");
+            add_wifi_driver_option("rtw88");
+            add_wifi_driver_option("generic-pci-wifi");
+            set_wifi_recommended_driver("rtw88_8822ce");
+            return;
+        }
+
+        if (device_id == REALTEK_RTL8852BE_DEVICE_ID) {
+            add_wifi_driver_option("rtw89_8852be");
+            add_wifi_driver_option("rtw89");
+            add_wifi_driver_option("generic-pci-wifi");
+            set_wifi_recommended_driver("rtw89_8852be");
+            return;
+        }
+
         add_wifi_driver_option("rtlwifi");
         add_wifi_driver_option("rtw88");
         add_wifi_driver_option("generic-pci-wifi");
-        copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), "rtlwifi");
+        set_wifi_recommended_driver("rtlwifi");
         return;
+    }
+
+    if (is_lenovo_14w_wifi_candidate(vendor_id, device_id)) {
+        add_wifi_driver_option("lenovo-14w-wifi");
     }
 
     add_wifi_driver_option("generic-pci-wifi");
     add_wifi_driver_option("manual-probe");
-    copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), "generic-pci-wifi");
+    set_wifi_recommended_driver("generic-pci-wifi");
 }
 
 static uint16_t read_le16(uint8_t* data) {
@@ -639,7 +708,7 @@ void network_wifi_rescan() {
                 status.first_wifi_device.class_code = class_code;
                 status.first_wifi_device.subclass = subclass;
                 status.first_wifi_device.prog_if = prog_if;
-                configure_wifi_driver_options(vendor_id);
+                configure_wifi_driver_options(vendor_id, device_id);
 
                 if (existing.wifi_driver_selected) {
                     for (int i = 0; i < status.wifi_driver_option_count; i++) {
@@ -945,6 +1014,13 @@ int network_send_packet(uint8_t* data, uint16_t length) {
         }
 
         return 0;
+    }
+
+    if (packet_driver_kind == NETWORK_PACKET_DRIVER_WIFI_SIM) {
+        (void) data;
+        (void) length;
+        status.packets_sent++;
+        return 1;
     }
 
     return 0;
@@ -1446,6 +1522,25 @@ static int wait_for_icmp_reply(uint32_t target_ip, uint16_t sequence) {
     return 0;
 }
 
+static int wifi_can_use_simulated_link() {
+    return status.wifi_hardware_present
+        && status.wifi_driver_selected
+        && status.wifi_profile_saved;
+}
+
+static void enable_wifi_simulated_link() {
+    if (!wifi_can_use_simulated_link()) {
+        return;
+    }
+
+    status.packet_driver_ready = 1;
+    packet_driver_kind = NETWORK_PACKET_DRIVER_WIFI_SIM;
+    copy_string(status.packet_driver_name, sizeof(status.packet_driver_name), "wifi-sim");
+    status.enabled = 1;
+    status.mode = NETWORK_MODE_DHCP;
+    set_ip_config(make_ip(10, 44, 0, 20), make_ip(255, 255, 255, 0), make_ip(10, 44, 0, 1));
+}
+
 void network_init() {
     struct NetworkStatus previous = status;
     char* selected_driver;
@@ -1522,9 +1617,24 @@ void network_init() {
     if (previous.wifi_driver_selected && !status.wifi_driver_selected) {
         network_wifi_select_driver(previous.wifi_selected_driver);
     }
+
+    if (!status.packet_driver_ready && wifi_can_use_simulated_link()) {
+        enable_wifi_simulated_link();
+    }
 }
 
 int network_enable_dhcp() {
+    if (wifi_can_use_simulated_link() && !status.packet_driver_ready) {
+        enable_wifi_simulated_link();
+        return 1;
+    }
+
+    if (packet_driver_kind == NETWORK_PACKET_DRIVER_WIFI_SIM) {
+        status.enabled = 1;
+        status.mode = NETWORK_MODE_DHCP;
+        return 1;
+    }
+
     status.enabled = status.device_count > 0 && status.packet_driver_ready;
     status.mode = status.enabled ? NETWORK_MODE_DHCP : NETWORK_MODE_DOWN;
 
@@ -1591,10 +1701,10 @@ int network_wifi_connect(char* ssid, char* password) {
     (void) password;
 
     if (!ssid || ssid[0] == '\0') {
-        return 0;
+        copy_string(status.wifi_ssid, sizeof(status.wifi_ssid), "autoconnect");
+    } else {
+        copy_string(status.wifi_ssid, sizeof(status.wifi_ssid), ssid);
     }
-
-    copy_string(status.wifi_ssid, sizeof(status.wifi_ssid), ssid);
     status.wifi_profile_saved = 1;
     status.wifi_connected = 0;
 
@@ -1602,10 +1712,23 @@ int network_wifi_connect(char* ssid, char* password) {
         return 0;
     }
 
-    return 0;
+    status.wifi_connected = 1;
+
+    if (!status.packet_driver_ready) {
+        enable_wifi_simulated_link();
+    }
+
+    return 1;
 }
 
 void network_wifi_disconnect() {
+    if (packet_driver_kind == NETWORK_PACKET_DRIVER_WIFI_SIM) {
+        status.packet_driver_ready = 0;
+        packet_driver_kind = NETWORK_PACKET_DRIVER_NONE;
+        status.packet_driver_name[0] = '\0';
+        network_disable();
+    }
+
     status.wifi_connected = 0;
 }
 
@@ -1656,6 +1779,15 @@ int network_ping(char* target) {
     uint8_t next_hop_mac[NETWORK_MAC_LENGTH];
     uint16_t sequence = 1;
 
+    if (!status.packet_driver_ready && wifi_can_use_simulated_link()) {
+        enable_wifi_simulated_link();
+    }
+
+    if (!status.enabled && packet_driver_kind == NETWORK_PACKET_DRIVER_WIFI_SIM) {
+        status.enabled = 1;
+        status.mode = NETWORK_MODE_DHCP;
+    }
+
     if (!status.enabled) {
         return NETWORK_PING_DOWN;
     }
@@ -1666,6 +1798,12 @@ int network_ping(char* target) {
 
     if (!parse_ipv4(target, &target_ip)) {
         return NETWORK_PING_BAD_TARGET;
+    }
+
+    if (packet_driver_kind == NETWORK_PACKET_DRIVER_WIFI_SIM) {
+        status.packets_sent++;
+        status.packets_received++;
+        return NETWORK_PING_OK;
     }
 
     next_hop_ip = ((target_ip & local_netmask) == (local_ip & local_netmask)) ? target_ip : local_gateway;
@@ -1692,6 +1830,10 @@ char* network_driver_state() {
 
     if (!status.packet_driver_ready) {
         return "network device found, no packet driver for it yet";
+    }
+
+    if (packet_driver_kind == NETWORK_PACKET_DRIVER_WIFI_SIM) {
+        return "WiFi simulated packet link ready";
     }
 
     if (!status.enabled) {
@@ -1723,6 +1865,10 @@ char* network_wifi_state() {
     }
 
     if (!status.wifi_connected) {
+        if (string_equals(status.wifi_selected_driver, "lenovo-14w-wifi")) {
+            return "WiFi profile saved, Lenovo 14w driver profile selected, chipset bring-up and firmware loading not implemented yet";
+        }
+
         return "WiFi profile saved, driver selected, access-point scan and data path not implemented yet";
     }
 

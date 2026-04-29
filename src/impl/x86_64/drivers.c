@@ -29,7 +29,8 @@
 #define E1000_DEVICE_ID_82541GI 0x1076
 #define MEDIATEK_VENDOR_ID 0x14c3
 #define MT7922_DEVICE_ID 0x7922
-#define DRIVER_OPTION_MAX_COUNT 4
+#define REALTEK_8822CE_DEVICE_ID 0xc822
+#define DRIVER_OPTION_MAX_COUNT 8
 
 static struct DriverStatus status;
 static char network_driver_options[DRIVER_OPTION_MAX_COUNT][DRIVER_NAME_SIZE];
@@ -164,6 +165,10 @@ static int is_supported_mt7922(uint16_t vendor_id, uint16_t device_id) {
     return vendor_id == MEDIATEK_VENDOR_ID && device_id == MT7922_DEVICE_ID;
 }
 
+static int is_supported_rtl8822ce(uint16_t vendor_id, uint16_t device_id) {
+    return vendor_id == RTL8139_VENDOR_ID && device_id == REALTEK_8822CE_DEVICE_ID;
+}
+
 static void configure_network_driver_options() {
     clear_driver_option_set(network_driver_options, &network_driver_option_count, network_recommended_driver);
 
@@ -243,29 +248,33 @@ static void configure_usb_driver_options() {
     }
 
     if (status.xhci_controllers > 0) {
-        add_driver_option(usb_driver_options, &usb_driver_option_count, "xhci");
-        copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "xhci");
+        add_driver_option(usb_driver_options, &usb_driver_option_count, "xhci-hub-stack");
+        copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "xhci-hub-stack");
     }
 
     if (status.ehci_controllers > 0) {
-        add_driver_option(usb_driver_options, &usb_driver_option_count, "ehci");
+        add_driver_option(usb_driver_options, &usb_driver_option_count, "ehci-hub-stack");
         if (usb_recommended_driver[0] == '\0') {
-            copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "ehci");
+            copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "ehci-hub-stack");
         }
     }
 
     if (status.ohci_controllers > 0) {
-        add_driver_option(usb_driver_options, &usb_driver_option_count, "ohci");
+        add_driver_option(usb_driver_options, &usb_driver_option_count, "ohci-hub-stack");
         if (usb_recommended_driver[0] == '\0') {
-            copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "ohci");
+            copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "ohci-hub-stack");
         }
     }
 
     if (status.uhci_controllers > 0) {
-        add_driver_option(usb_driver_options, &usb_driver_option_count, "uhci");
+        add_driver_option(usb_driver_options, &usb_driver_option_count, "uhci-hub-stack");
         if (usb_recommended_driver[0] == '\0') {
-            copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "uhci");
+            copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "uhci-hub-stack");
         }
+    }
+
+    if (status.xhci_controllers > 0 || status.ehci_controllers > 0 || status.ohci_controllers > 0 || status.uhci_controllers > 0) {
+        add_driver_option(usb_driver_options, &usb_driver_option_count, "generic-usb-hub");
     }
 
     add_driver_option(usb_driver_options, &usb_driver_option_count, "generic-usb-host");
@@ -339,6 +348,9 @@ static void clear_status() {
     status.e1000_loaded = 0;
     status.rtl8111_loaded = 0;
     status.mt7922_loaded = 0;
+    status.rtl8822ce_loaded = 0;
+    status.usb_hub_stack_modeled = 0;
+    status.lenovo_14w_profile_suggested = 0;
     status.storage_driver_loaded = 0;
     status.wireless_driver_loaded = 0;
     clear_device(&status.first_network);
@@ -410,6 +422,8 @@ void drivers_rescan() {
                         status.e1000_loaded = 1;
                     } else if (is_supported_mt7922(vendor_id, device_id)) {
                         status.mt7922_loaded = 1;
+                    } else if (is_supported_rtl8822ce(vendor_id, device_id)) {
+                        status.rtl8822ce_loaded = 1;
                     }
                 }
 
@@ -453,6 +467,8 @@ void drivers_rescan() {
     configure_network_driver_options();
     configure_storage_driver_options();
     configure_usb_driver_options();
+    status.usb_hub_stack_modeled = status.usb_controllers > 0;
+    status.lenovo_14w_profile_suggested = status.mt7922_loaded || status.rtl8822ce_loaded;
 
     if (!restore_selected_driver(network_selected_driver,
                                  network_driver_options,
@@ -628,6 +644,10 @@ char* drivers_wireless_state() {
 
     if (status.wireless_driver_loaded) {
         return "wireless driver loaded";
+    }
+
+    if (status.lenovo_14w_profile_suggested) {
+        return "wireless controller detected, Lenovo 14w profile suggested; chipset data path and firmware loader not implemented yet";
     }
 
     return "wireless controller detected, chipset driver and firmware loader not implemented yet";
