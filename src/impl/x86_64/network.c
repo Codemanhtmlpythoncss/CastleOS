@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "network.h"
 #include "drivers.h"
+#include "timer.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA 0xCFC
@@ -91,8 +92,34 @@
 #define ETH_TYPE_IPV4 0x0800
 #define ETH_TYPE_ARP 0x0806
 #define IPV4_PROTOCOL_ICMP 1
+#define IPV4_PROTOCOL_UDP 17
 #define ICMP_ECHO_REPLY 0
 #define ICMP_ECHO_REQUEST 8
+#define DHCP_CLIENT_PORT 68
+#define DHCP_SERVER_PORT 67
+#define DHCP_MAGIC_COOKIE 0x63825363
+#define DHCP_FLAGS_BROADCAST 0x8000
+#define DHCP_OPTION_SUBNET_MASK 1
+#define DHCP_OPTION_ROUTER 3
+#define DHCP_OPTION_DNS 6
+#define DHCP_OPTION_REQUESTED_IP 50
+#define DHCP_OPTION_LEASE_TIME 51
+#define DHCP_OPTION_MESSAGE_TYPE 53
+#define DHCP_OPTION_SERVER_IDENTIFIER 54
+#define DHCP_OPTION_PARAMETER_REQUEST_LIST 55
+#define DHCP_OPTION_CLIENT_IDENTIFIER 61
+#define DHCP_OPTION_HOSTNAME 12
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_MESSAGE_DISCOVER 1
+#define DHCP_MESSAGE_OFFER 2
+#define DHCP_MESSAGE_REQUEST 3
+#define DHCP_MESSAGE_ACK 5
+#define DHCP_MESSAGE_NAK 6
+#define DHCP_BOOTP_FIXED_SIZE 236
+#define DHCP_BOOTP_WITH_COOKIE_SIZE 240
+#define DHCP_TIMEOUT_MS 2500
+#define DHCP_RETRY_COUNT 3
 #define NETWORK_PACKET_DRIVER_NONE 0
 #define NETWORK_PACKET_DRIVER_RTL8139 1
 #define NETWORK_PACKET_DRIVER_E1000 2
@@ -116,6 +143,14 @@ struct E1000RxDescriptor {
     uint16_t special;
 } __attribute__((packed));
 
+struct DhcpLease {
+    uint8_t message_type;
+    uint32_t offered_ip;
+    uint32_t subnet_mask;
+    uint32_t router;
+    uint32_t server_identifier;
+};
+
 static struct NetworkStatus status;
 static uint16_t rtl_io_base;
 static uint16_t rtl_rx_offset;
@@ -136,6 +171,8 @@ static struct E1000RxDescriptor e1000_rx_descriptors[E1000_RX_DESC_COUNT] __attr
 static struct E1000TxDescriptor e1000_tx_descriptors[E1000_TX_DESC_COUNT] __attribute__((aligned(16)));
 static uint8_t e1000_rx_buffers[E1000_RX_DESC_COUNT][E1000_BUFFER_SIZE] __attribute__((aligned(16)));
 static uint8_t e1000_tx_buffers[E1000_TX_DESC_COUNT][E1000_BUFFER_SIZE] __attribute__((aligned(16)));
+
+static void process_incoming_arp(uint8_t* packet, uint16_t length);
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -1001,6 +1038,276 @@ static void send_arp_reply(uint8_t* request) {
     network_send_packet(reply, sizeof(reply));
 }
 
+static uint32_t build_dhcp_transaction_id() {
+    uint32_t transaction_id = 0x43415354u ^ (uint32_t) get_time_ms();
+
+    for (int i = 0; i < NETWORK_MAC_LENGTH; i++) {
+        transaction_id ^= ((uint32_t) status.mac[i]) << ((i % 4) * 8);
+        transaction_id = (transaction_id << 5) | (transaction_id >> 27);
+    }
+
+    return transaction_id;
+}
+
+static void append_dhcp_option_u8(uint8_t* packet, size_t* option_offset, uint8_t option, uint8_t value) {
+    packet[(*option_offset)++] = option;
+    packet[(*option_offset)++] = 1;
+    packet[(*option_offset)++] = value;
+}
+
+static void append_dhcp_option_u32(uint8_t* packet, size_t* option_offset, uint8_t option, uint32_t value) {
+    packet[(*option_offset)++] = option;
+    packet[(*option_offset)++] = 4;
+    write_be32(packet + *option_offset, value);
+    *option_offset += 4;
+}
+
+static int send_dhcp_message(uint8_t message_type,
+                             uint32_t transaction_id,
+                             uint32_t requested_ip,
+                             uint32_t server_identifier) {
+    static uint8_t broadcast_mac[NETWORK_MAC_LENGTH] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint8_t packet[512];
+    size_t udp_offset = 34;
+    size_t bootp_offset = udp_offset + 8;
+    size_t option_offset = bootp_offset + DHCP_BOOTP_FIXED_SIZE;
+    uint16_t udp_length;
+    uint16_t ip_total_length;
+
+    memory_set(packet, 0, sizeof(packet));
+    build_ethernet_header(packet, broadcast_mac, ETH_TYPE_IPV4);
+
+    packet[14] = 0x45;
+    packet[15] = 0;
+    write_be16(packet + 18, (uint16_t) transaction_id);
+    write_be16(packet + 20, 0);
+    packet[22] = 64;
+    packet[23] = IPV4_PROTOCOL_UDP;
+    write_be32(packet + 26, 0);
+    write_be32(packet + 30, make_ip(255, 255, 255, 255));
+
+    write_be16(packet + udp_offset, DHCP_CLIENT_PORT);
+    write_be16(packet + udp_offset + 2, DHCP_SERVER_PORT);
+
+    packet[bootp_offset] = 1;
+    packet[bootp_offset + 1] = 1;
+    packet[bootp_offset + 2] = NETWORK_MAC_LENGTH;
+    packet[bootp_offset + 3] = 0;
+    write_be32(packet + bootp_offset + 4, transaction_id);
+    write_be16(packet + bootp_offset + 8, 0);
+    write_be16(packet + bootp_offset + 10, DHCP_FLAGS_BROADCAST);
+    memory_copy(packet + bootp_offset + 28, status.mac, NETWORK_MAC_LENGTH);
+    write_be32(packet + option_offset, DHCP_MAGIC_COOKIE);
+    option_offset += 4;
+
+    append_dhcp_option_u8(packet, &option_offset, DHCP_OPTION_MESSAGE_TYPE, message_type);
+
+    packet[option_offset++] = DHCP_OPTION_CLIENT_IDENTIFIER;
+    packet[option_offset++] = (uint8_t) (NETWORK_MAC_LENGTH + 1);
+    packet[option_offset++] = 1;
+    memory_copy(packet + option_offset, status.mac, NETWORK_MAC_LENGTH);
+    option_offset += NETWORK_MAC_LENGTH;
+
+    packet[option_offset++] = DHCP_OPTION_HOSTNAME;
+    packet[option_offset++] = 8;
+    memory_copy(packet + option_offset, (uint8_t*) "CastleOS", 8);
+    option_offset += 8;
+
+    if (message_type == DHCP_MESSAGE_REQUEST && requested_ip != 0) {
+        append_dhcp_option_u32(packet, &option_offset, DHCP_OPTION_REQUESTED_IP, requested_ip);
+    }
+
+    if (message_type == DHCP_MESSAGE_REQUEST && server_identifier != 0) {
+        append_dhcp_option_u32(packet, &option_offset, DHCP_OPTION_SERVER_IDENTIFIER, server_identifier);
+    }
+
+    packet[option_offset++] = DHCP_OPTION_PARAMETER_REQUEST_LIST;
+    packet[option_offset++] = 5;
+    packet[option_offset++] = DHCP_OPTION_SUBNET_MASK;
+    packet[option_offset++] = DHCP_OPTION_ROUTER;
+    packet[option_offset++] = DHCP_OPTION_DNS;
+    packet[option_offset++] = DHCP_OPTION_LEASE_TIME;
+    packet[option_offset++] = DHCP_OPTION_SERVER_IDENTIFIER;
+    packet[option_offset++] = DHCP_OPTION_END;
+
+    udp_length = (uint16_t) (option_offset - udp_offset);
+    ip_total_length = (uint16_t) (option_offset - 14);
+    write_be16(packet + udp_offset + 4, udp_length);
+    write_be16(packet + udp_offset + 6, 0);
+    write_be16(packet + 16, ip_total_length);
+    write_be16(packet + 24, checksum16(packet + 14, 20));
+    return network_send_packet(packet, (uint16_t) option_offset);
+}
+
+static void parse_dhcp_options(uint8_t* options, uint16_t options_length, struct DhcpLease* lease) {
+    uint16_t index = 0;
+
+    while (index < options_length) {
+        uint8_t option = options[index++];
+
+        if (option == DHCP_OPTION_PAD) {
+            continue;
+        }
+
+        if (option == DHCP_OPTION_END) {
+            return;
+        }
+
+        if (index >= options_length) {
+            return;
+        }
+
+        uint8_t option_length = options[index++];
+
+        if ((uint16_t) (index + option_length) > options_length) {
+            return;
+        }
+
+        if (option == DHCP_OPTION_MESSAGE_TYPE && option_length >= 1) {
+            lease->message_type = options[index];
+        } else if (option == DHCP_OPTION_SUBNET_MASK && option_length >= 4) {
+            lease->subnet_mask = read_be32(options + index);
+        } else if (option == DHCP_OPTION_ROUTER && option_length >= 4) {
+            lease->router = read_be32(options + index);
+        } else if (option == DHCP_OPTION_SERVER_IDENTIFIER && option_length >= 4) {
+            lease->server_identifier = read_be32(options + index);
+        }
+
+        index = (uint16_t) (index + option_length);
+    }
+}
+
+static int wait_for_dhcp_reply(uint32_t transaction_id, struct DhcpLease* lease, uint32_t timeout_ms) {
+    uint8_t received[NETWORK_MAX_PACKET_SIZE];
+    uint16_t received_length;
+    uint64_t deadline = get_time_ms() + timeout_ms;
+
+    while (get_time_ms() < deadline) {
+        uint16_t ethernet_type;
+        uint16_t ip_header_length;
+        uint16_t udp_offset;
+        uint16_t udp_length;
+        uint16_t payload_length;
+        uint8_t* bootp;
+
+        if (!network_receive_packet(received, &received_length)) {
+            continue;
+        }
+
+        if (received_length < 42) {
+            continue;
+        }
+
+        ethernet_type = read_be16(received + 12);
+
+        if (ethernet_type == ETH_TYPE_ARP) {
+            process_incoming_arp(received, received_length);
+            continue;
+        }
+
+        if (ethernet_type != ETH_TYPE_IPV4 || received[23] != IPV4_PROTOCOL_UDP) {
+            continue;
+        }
+
+        ip_header_length = (uint16_t) ((received[14] & 0x0F) * 4);
+        udp_offset = (uint16_t) (14 + ip_header_length);
+
+        if (received_length < udp_offset + 8 + DHCP_BOOTP_WITH_COOKIE_SIZE) {
+            continue;
+        }
+
+        if (read_be16(received + udp_offset) != DHCP_SERVER_PORT
+            || read_be16(received + udp_offset + 2) != DHCP_CLIENT_PORT) {
+            continue;
+        }
+
+        udp_length = read_be16(received + udp_offset + 4);
+        if (udp_length < 8 + DHCP_BOOTP_WITH_COOKIE_SIZE) {
+            continue;
+        }
+
+        payload_length = (uint16_t) (udp_length - 8);
+        bootp = received + udp_offset + 8;
+
+        if (bootp[0] != 2 || bootp[1] != 1 || bootp[2] != NETWORK_MAC_LENGTH) {
+            continue;
+        }
+
+        if (read_be32(bootp + 4) != transaction_id) {
+            continue;
+        }
+
+        if (!memory_equals(bootp + 28, status.mac, NETWORK_MAC_LENGTH)) {
+            continue;
+        }
+
+        if (read_be32(bootp + DHCP_BOOTP_FIXED_SIZE) != DHCP_MAGIC_COOKIE) {
+            continue;
+        }
+
+        memory_set((uint8_t*) lease, 0, sizeof(*lease));
+        lease->offered_ip = read_be32(bootp + 16);
+        parse_dhcp_options(bootp + DHCP_BOOTP_WITH_COOKIE_SIZE,
+                           (uint16_t) (payload_length - DHCP_BOOTP_WITH_COOKIE_SIZE),
+                           lease);
+
+        if (lease->message_type != 0) {
+            return lease->message_type;
+        }
+    }
+
+    return 0;
+}
+
+static int dhcp_acquire_lease() {
+    uint32_t default_netmask = make_ip(255, 255, 255, 0);
+
+    for (int attempt = 0; attempt < DHCP_RETRY_COUNT; attempt++) {
+        uint32_t transaction_id = build_dhcp_transaction_id() ^ (uint32_t) attempt;
+        struct DhcpLease offer;
+        struct DhcpLease ack;
+        uint32_t subnet_mask;
+        uint32_t gateway;
+        int response_type;
+
+        if (!send_dhcp_message(DHCP_MESSAGE_DISCOVER, transaction_id, 0, 0)) {
+            timer_wait(100);
+            continue;
+        }
+
+        response_type = wait_for_dhcp_reply(transaction_id, &offer, DHCP_TIMEOUT_MS);
+        if (response_type != DHCP_MESSAGE_OFFER || offer.offered_ip == 0) {
+            timer_wait(100);
+            continue;
+        }
+
+        if (!send_dhcp_message(DHCP_MESSAGE_REQUEST,
+                               transaction_id,
+                               offer.offered_ip,
+                               offer.server_identifier)) {
+            timer_wait(100);
+            continue;
+        }
+
+        response_type = wait_for_dhcp_reply(transaction_id, &ack, DHCP_TIMEOUT_MS);
+        if (response_type != DHCP_MESSAGE_ACK) {
+            timer_wait(100);
+            continue;
+        }
+
+        if (ack.offered_ip == 0) {
+            ack.offered_ip = offer.offered_ip;
+        }
+
+        subnet_mask = ack.subnet_mask ? ack.subnet_mask : (offer.subnet_mask ? offer.subnet_mask : default_netmask);
+        gateway = ack.router ? ack.router : (offer.router ? offer.router : (ack.server_identifier ? ack.server_identifier : offer.server_identifier));
+        set_ip_config(ack.offered_ip, subnet_mask, gateway);
+        return 1;
+    }
+
+    return 0;
+}
+
 static void process_incoming_arp(uint8_t* packet, uint16_t length) {
     uint16_t operation;
     uint32_t target_ip;
@@ -1217,17 +1524,32 @@ void network_init() {
     }
 }
 
-void network_enable_dhcp() {
+int network_enable_dhcp() {
     status.enabled = status.device_count > 0 && status.packet_driver_ready;
     status.mode = status.enabled ? NETWORK_MODE_DHCP : NETWORK_MODE_DOWN;
 
-    if (status.enabled) {
-        set_ip_config(make_ip(10, 0, 2, 15), make_ip(255, 255, 255, 0), make_ip(10, 0, 2, 2));
-    } else {
+    if (!status.enabled) {
         status.ip[0] = '\0';
         status.netmask[0] = '\0';
         status.gateway[0] = '\0';
+        return 0;
     }
+
+    local_ip = 0;
+    local_netmask = 0;
+    local_gateway = 0;
+    status.ip[0] = '\0';
+    status.netmask[0] = '\0';
+    status.gateway[0] = '\0';
+
+    if (!dhcp_acquire_lease()) {
+        network_disable();
+        return 0;
+    }
+
+    status.enabled = 1;
+    status.mode = NETWORK_MODE_DHCP;
+    return 1;
 }
 
 void network_set_static(char* ip, char* netmask, char* gateway) {
@@ -1401,7 +1723,7 @@ char* network_wifi_state() {
     }
 
     if (!status.wifi_connected) {
-        return "WiFi profile saved, driver selected, data path not implemented yet";
+        return "WiFi profile saved, driver selected, access-point scan and data path not implemented yet";
     }
 
     return "WiFi connected";

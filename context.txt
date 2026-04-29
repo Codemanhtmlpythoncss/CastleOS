@@ -33,10 +33,13 @@ User goals from this chat
   - also add ssh
 - Latest reminder from the user:
   - keep updating this context file
+- Clarified edit boundary from the user:
+  - the current working directory can be edited
+  - do not edit a nested directory named `castleos/` inside it
 - User asked to keep this file updated every prompt so context survives better if the chat limit is hit.
 
 Important environment context
-- Working directory: /Users/barnabyraynes/Downloads/CastleOS
+- Working directory: /Users/barnabyraynes/Documents/github/CastleOS
 - The local machine can compile and link the kernel, but local ISO packaging fails because grub-mkrescue is not installed outside Docker.
 - README says the intended build flow is:
   1) docker run --rm -it -v $(pwd):/root/env myos-buildenv
@@ -276,6 +279,9 @@ Latest diagnostic for the current prompt
     - correct BAR1 I/O selection
     - EEPROM MAC fallback
     but that still did not make the packet driver bind in the latest guest test
+- Latest runtime diagnosis from the user:
+  - `ping` is failing with `ICMP timeout`, not `ARP timeout`
+  - that means ARP resolution succeeded and the failure is later in ICMP reply handling or packet validity
 
 Files most relevant right now
 - src/impl/x86_64/shell.c
@@ -290,3 +296,53 @@ Files most relevant right now
 User preference note
 - Keep updating this file as the conversation progresses so the work survives context pressure better.
 - Update this file on every new user prompt, not just at major milestones.
+- Directory boundary clarification:
+  - the current directory `/Users/barnabyraynes/Documents/github/CastleOS` is okay to edit
+  - do not edit the nested `castleos/` directory that lives inside this directory
+- Latest status:
+  - the ICMP timeout issue has not been fixed yet in the most recent turn
+  - the last action was only to clarify the editable directory boundary and record it here
+- Latest handoff:
+  - user asked to pause code changes and provide exact commands instead
+  - next useful step is to have the user run the guest commands and report the output so the ICMP failure can be pinned down
+- Latest user report:
+  - ping got a reply back
+  - this means the ICMP path is working at least in the latest test
+- Latest user test:
+  - user tried pinging 8.8.8.8
+  - waiting on the exact result to tell whether the failure is local-link only or upstream/NAT related
+- Latest network note:
+  - CastleOS already routes off-subnet traffic to the configured gateway in `network_ping()`
+  - QEMU user-mode networking is the likely blocker for external ICMP, not the guest code itself
+  - local-router ping can work while internet ping still fails
+- UTM note:
+  - UTM is QEMU-based
+  - shared/emulated NAT-style networking is still likely to have the same ping-to-internet limits
+  - bridged networking is the better bet if the host interface supports it
+- Latest user request:
+  - create ASCII art that looks like a castle
+- Latest formatting request:
+  - make the ASCII art paste into an IDE with the same spacing and alignment
+- Latest user preference:
+  - make the castle wide enough to span the text area, but keep it relatively short
+- Latest user formatting request:
+  - make the castle ASCII art a single line so IDEs won't auto-wrap or error on paste
+- Clarification:
+  - user wants one source line containing `\n` escapes, so the terminal prints the castle across multiple lines
+- Latest castle request:
+  - the previous castle still looks off
+  - keep iterating until the terminal output reads like a proper wide, low castle
+- Latest refinement:
+  - keep the source as one line with `\n` escapes, but make the rendered output wider and more castle-like
+- Latest README update:
+  - README was rewritten to be more polished and GitHub-friendly
+  - it now has a clickable contents section and clearer build/run/status notes
+- Latest user request:
+  - make the OS more usable on real hardware
+  - include drivers by default where possible
+  - add Shift+Up / Shift+Down terminal scrolling
+  - push robustness as far as realistically possible, but avoid fake guarantees
+- Latest user request:
+  - make Ethernet networking work with real DHCP and internet routing where the NIC path supports it
+  - add install options for DHCP and internet-facing network setup
+  - replace manual SSID entry with WiFi network scanning and selection when real WiFi scanning is available
