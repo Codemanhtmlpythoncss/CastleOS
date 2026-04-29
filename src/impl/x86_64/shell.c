@@ -2433,8 +2433,9 @@ static void cmd_net_config() {
     }
 
     if (choice == '5') {
+        drivers_rescan();
         network_init();
-        print_str("PCI network scan complete");
+        print_str("Driver and PCI network scan complete");
         print_newline();
         print_network_status();
         return;
@@ -2451,7 +2452,7 @@ static void cmd_wifi_config() {
 
     if (choice == '2') {
         drivers_rescan();
-        network_wifi_rescan();
+        network_init();
         print_wifi_status_details();
         print_newline();
         print_wifi_driver_options();
@@ -2671,7 +2672,7 @@ static void cmd_drivers_config() {
 
     if (choice == '2') {
         drivers_rescan();
-        network_wifi_rescan();
+        network_init();
         refresh_install_targets();
         print_str("Driver scan complete");
         print_newline();
@@ -3303,8 +3304,9 @@ static void cmd_net(char* args) {
     }
 
     if (strcmp(command, "rescan") == 0) {
+        drivers_rescan();
         network_init();
-        print_str("PCI network scan complete");
+        print_str("Driver and PCI network scan complete");
         print_newline();
         print_network_status();
         return;
@@ -3466,7 +3468,7 @@ static void cmd_wifi(char* args) {
 
     if (strcmp(command, "scan") == 0) {
         drivers_rescan();
-        network_wifi_rescan();
+        network_init();
         print_wifi_status_details();
         print_newline();
         print_wifi_driver_options();
@@ -4048,7 +4050,7 @@ static void cmd_drivers(char* args) {
 
     if (command && strcmp(command, "rescan") == 0) {
         drivers_rescan();
-        network_wifi_rescan();
+        network_init();
         refresh_install_targets();
         print_str("Driver scan complete");
         print_newline();
