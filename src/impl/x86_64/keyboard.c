@@ -13,6 +13,7 @@ static inline void outb(uint16_t port, uint8_t value) {
 }
 
 static void keyboard_debounce() {
+    timer_wait(2000);
 }
 
 static char normal_table[128] = {
