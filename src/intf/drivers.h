@@ -38,6 +38,9 @@ struct DriverStatus {
     int e1000_loaded;
     int rtl8111_loaded;
     int mt7922_loaded;
+    int rtl8822ce_loaded;
+    int usb_hub_stack_modeled;
+    int lenovo_14w_profile_suggested;
     int storage_driver_loaded;
     int wireless_driver_loaded;
     struct DriverPciDevice first_network;

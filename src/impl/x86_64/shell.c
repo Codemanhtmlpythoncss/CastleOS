@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include "drivers.h"
 #include "shell.h"
+#include "shell_utils.h"
+#include "shell_format.h"
 #include "keyboard.h"
 #include "network.h"
 #include "print.h"
@@ -126,19 +128,6 @@ static char ssh_remote_user[SHELL_USERNAME_SIZE] = "barnaby";
 static uint32_t ssh_host_key_seed = 0x53485348;
 static char ssh_host_key_fingerprint[SSH_FINGERPRINT_SIZE];
 
-static size_t str_length(const char* str);
-static void copy_string(char* destination, size_t destination_size, const char* source);
-static void append_string(char* destination, size_t destination_size, const char* source);
-static void append_char(char* destination, size_t destination_size, char character);
-static void append_u64_string(char* destination, size_t destination_size, uint64_t value);
-static void append_hex_u8_string(char* destination, size_t destination_size, uint8_t value);
-static int parse_u16_decimal(const char* text, uint16_t* value);
-static char* skip_spaces(char* text);
-static char* next_token(char** text);
-static size_t align_up(size_t value, size_t alignment);
-static void print_u64(uint64_t value);
-static void print_hex_u8(uint8_t value);
-static void print_hex_u16(uint16_t value);
 static inline void outw(uint16_t port, uint16_t value);
 static void cpuid(unsigned int code, unsigned int* a, unsigned int* b, unsigned int* c, unsigned int* d);
 static void get_cpu_brand_string(char* name, size_t name_size);
@@ -187,6 +176,11 @@ static void print_driver_choices_for_subsystem(char* subsystem);
 static int select_driver_for_subsystem(char* subsystem, char* driver_name);
 static char* selected_driver_for_subsystem(char* subsystem);
 static char* recommended_driver_for_subsystem(char* subsystem);
+static void rescan_drivers_and_targets();
+static void rescan_drivers_network_and_targets();
+static void autoselect_install_drivers(char network_choice);
+static void print_current_install_target_and_inventory();
+static void print_all_subsystem_driver_choices();
 static void persist_driver_preferences();
 static void persist_install_target_configuration();
 static void persist_ssh_configuration();
@@ -276,193 +270,6 @@ static struct Command commands[] = {
     {"pci", cmd_pci, "shows detected PCI hardware summary", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"shutdown", cmd_shutdown, "powers off the machine", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
 };
-
-static size_t str_length(const char* str) {
-    size_t length = 0;
-
-    while (str[length] != '\0') {
-        length++;
-    }
-
-    return length;
-}
-
-static void copy_string(char* destination, size_t destination_size, const char* source) {
-    size_t i = 0;
-
-    if (destination_size == 0) {
-        return;
-    }
-
-    while (source[i] != '\0' && i + 1 < destination_size) {
-        destination[i] = source[i];
-        i++;
-    }
-
-    destination[i] = '\0';
-}
-
-static void append_string(char* destination, size_t destination_size, const char* source) {
-    size_t length = str_length(destination);
-    size_t i = 0;
-
-    if (length >= destination_size) {
-        return;
-    }
-
-    while (source[i] != '\0' && length + 1 < destination_size) {
-        destination[length++] = source[i++];
-    }
-
-    destination[length] = '\0';
-}
-
-static void append_char(char* destination, size_t destination_size, char character) {
-    size_t length = str_length(destination);
-
-    if (length + 1 >= destination_size) {
-        return;
-    }
-
-    destination[length] = character;
-    destination[length + 1] = '\0';
-}
-
-static void append_u64_string(char* destination, size_t destination_size, uint64_t value) {
-    char digits[21];
-    size_t index = 0;
-
-    if (value == 0) {
-        append_char(destination, destination_size, '0');
-        return;
-    }
-
-    while (value > 0 && index < sizeof(digits)) {
-        digits[index++] = (char) ('0' + (value % 10));
-        value /= 10;
-    }
-
-    while (index > 0) {
-        append_char(destination, destination_size, digits[--index]);
-    }
-}
-
-static void append_hex_u8_string(char* destination, size_t destination_size, uint8_t value) {
-    char digits[] = "0123456789abcdef";
-
-    append_string(destination, destination_size, "0x");
-    append_char(destination, destination_size, digits[(value >> 4) & 0xF]);
-    append_char(destination, destination_size, digits[value & 0xF]);
-}
-
-static int parse_u16_decimal(const char* text, uint16_t* value) {
-    uint32_t result = 0;
-    size_t index = 0;
-
-    if (!text || !value || text[0] == '\0') {
-        return 0;
-    }
-
-    while (text[index] != '\0') {
-        char character = text[index++];
-
-        if (character < '0' || character > '9') {
-            return 0;
-        }
-
-        result = result * 10 + (uint32_t) (character - '0');
-        if (result > 65535) {
-            return 0;
-        }
-    }
-
-    *value = (uint16_t) result;
-    return 1;
-}
-
-static char* skip_spaces(char* text) {
-    if (!text) {
-        return 0;
-    }
-
-    while (*text == ' ' || *text == '\t') {
-        text++;
-    }
-
-    if (*text == '\0') {
-        return 0;
-    }
-
-    return text;
-}
-
-static char* next_token(char** text) {
-    char* token;
-
-    if (!text || !*text) {
-        return 0;
-    }
-
-    token = skip_spaces(*text);
-
-    if (!token) {
-        *text = 0;
-        return 0;
-    }
-
-    *text = token;
-
-    while (**text != '\0' && **text != ' ' && **text != '\t') {
-        (*text)++;
-    }
-
-    if (**text != '\0') {
-        **text = '\0';
-        (*text)++;
-    }
-
-    return token;
-}
-
-static size_t align_up(size_t value, size_t alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
-static void print_u64(uint64_t value) {
-    char digits[21];
-    size_t index = 0;
-
-    if (value == 0) {
-        print_char('0');
-        return;
-    }
-
-    while (value > 0 && index < sizeof(digits)) {
-        digits[index++] = (char) ('0' + (value % 10));
-        value /= 10;
-    }
-
-    while (index > 0) {
-        print_char(digits[--index]);
-    }
-}
-
-static void print_hex_u16(uint16_t value) {
-    char digits[] = "0123456789abcdef";
-
-    print_str("0x");
-
-    for (int shift = 12; shift >= 0; shift -= 4) {
-        print_char(digits[(value >> shift) & 0xF]);
-    }
-}
-
-static void print_hex_u8(uint8_t value) {
-    char digits[] = "0123456789abcdef";
-
-    print_char(digits[(value >> 4) & 0xF]);
-    print_char(digits[value & 0xF]);
-}
 
 static inline void outw(uint16_t port, uint16_t value) {
     __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
@@ -1955,6 +1762,14 @@ static void print_driver_status() {
     print_u64((uint64_t) status.xhci_controllers);
     print_newline();
 
+    print_str("USB hubs: ");
+    print_str(status.usb_hub_stack_modeled ? "host+hub stack modeled" : "no USB host controller detected");
+    print_newline();
+
+    print_str("Lenovo 14w profile: ");
+    print_str(status.lenovo_14w_profile_suggested ? "suggested" : "not detected");
+    print_newline();
+
     print_str("Driver selections: net ");
     print_str(drivers_selected_driver("network")[0] ? drivers_selected_driver("network") : "(none)");
     print_str(" wifi ");
@@ -2126,6 +1941,69 @@ static void print_driver_choices_for_subsystem(char* subsystem) {
         print_str(" - ");
         print_str(option);
     }
+}
+
+static void rescan_drivers_and_targets() {
+    drivers_rescan();
+    refresh_install_targets();
+}
+
+static void rescan_drivers_network_and_targets() {
+    rescan_drivers_and_targets();
+    network_init();
+}
+
+static void autoselect_install_drivers(char network_choice) {
+    char* driver_name;
+
+    drivers_rescan();
+
+    driver_name = drivers_recommended_driver("network");
+    if (driver_name && driver_name[0]) {
+        drivers_select_driver("network", driver_name);
+    }
+
+    driver_name = drivers_recommended_driver("storage");
+    if (driver_name && driver_name[0]) {
+        drivers_select_driver("storage", driver_name);
+    }
+
+    driver_name = drivers_recommended_driver("usb");
+    if (driver_name && driver_name[0]) {
+        drivers_select_driver("usb", driver_name);
+    }
+
+    network_init();
+
+    if (network_choice == '3') {
+        driver_name = network_wifi_recommended_driver();
+        if (driver_name && driver_name[0]) {
+            network_wifi_select_driver(driver_name);
+        }
+    }
+
+    persist_driver_preferences();
+    refresh_install_targets();
+}
+
+static void print_current_install_target_and_inventory() {
+    print_str("Current install target: ");
+    print_str(install_target);
+    print_newline();
+    print_disk_inventory();
+}
+
+static void print_all_subsystem_driver_choices() {
+    print_driver_choices_for_subsystem("network");
+    print_newline();
+    print_newline();
+    print_driver_choices_for_subsystem("wifi");
+    print_newline();
+    print_newline();
+    print_driver_choices_for_subsystem("storage");
+    print_newline();
+    print_newline();
+    print_driver_choices_for_subsystem("usb");
 }
 
 static void persist_driver_preferences() {
@@ -2654,18 +2532,14 @@ static void cmd_disk_config() {
     }
 
     if (choice == '4') {
-        drivers_rescan();
-        refresh_install_targets();
+        rescan_drivers_and_targets();
         print_str("Disk inventory refreshed");
         print_newline();
         print_disk_inventory();
         return;
     }
 
-    print_str("Current install target: ");
-    print_str(install_target);
-    print_newline();
-    print_disk_inventory();
+    print_current_install_target_and_inventory();
 }
 
 static void cmd_drivers_config() {
@@ -2674,9 +2548,7 @@ static void cmd_drivers_config() {
     char* driver_name;
 
     if (choice == '2') {
-        drivers_rescan();
-        network_init();
-        refresh_install_targets();
+        rescan_drivers_network_and_targets();
         print_str("Driver scan complete");
         print_newline();
         print_driver_status();
@@ -3178,7 +3050,7 @@ static void cmd_install(char* args) {
         print_str("static ");
         print_str(ip);
     } else if (network_choice == '3') {
-        print_str("wifi ");
+        print_str("wifi dhcp ");
         print_str(wifi_ssid[0] ? wifi_ssid : "(no ssid)");
     } else if (network_choice == '4') {
         print_str("off");
@@ -3226,7 +3098,7 @@ static void cmd_install(char* args) {
                 append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), gateway);
                 append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "\n");
             } else if (network_choice == '3') {
-                copy_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "mode=wifi\n");
+                copy_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "mode=wifi-dhcp\n");
             } else if (network_choice == '4') {
                 copy_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "mode=down\n");
             } else {
@@ -3262,10 +3134,22 @@ static void cmd_install(char* args) {
     }
     persist_ssh_configuration();
 
+    autoselect_install_drivers(network_choice);
+
+    if (network_choice == '3') {
+        struct NetworkStatus install_network_status = network_get_status();
+
+        if (!install_network_status.wifi_driver_selected) {
+            print_str("Install warning: no recommended WiFi driver could be auto-selected for detected hardware");
+            print_newline();
+        }
+    }
+
     if (network_choice == '2') {
         network_set_static(ip, netmask, gateway);
     } else if (network_choice == '3') {
         network_wifi_connect(wifi_ssid, wifi_password);
+        dhcp_configured = network_enable_dhcp();
     } else if (network_choice == '4') {
         network_disable();
     } else {
@@ -3984,20 +3868,14 @@ static void cmd_disk(char* args) {
     struct InstallTarget* target;
 
     if (!args) {
-        print_str("Current install target: ");
-        print_str(install_target);
-        print_newline();
-        print_disk_inventory();
+        print_current_install_target_and_inventory();
         return;
     }
 
     command = next_token(&args);
 
     if (!command || strcmp(command, "status") == 0 || strcmp(command, "list") == 0) {
-        print_str("Current install target: ");
-        print_str(install_target);
-        print_newline();
-        print_disk_inventory();
+        print_current_install_target_and_inventory();
         return;
     }
 
@@ -4021,8 +3899,7 @@ static void cmd_disk(char* args) {
     }
 
     if (strcmp(command, "rescan") == 0) {
-        drivers_rescan();
-        refresh_install_targets();
+        rescan_drivers_and_targets();
         print_str("Disk inventory refreshed");
         print_newline();
         print_disk_inventory();
@@ -4062,9 +3939,7 @@ static void cmd_drivers(char* args) {
     struct DriverStatus status;
 
     if (command && strcmp(command, "rescan") == 0) {
-        drivers_rescan();
-        network_init();
-        refresh_install_targets();
+        rescan_drivers_network_and_targets();
         print_str("Driver scan complete");
         print_newline();
     } else if (command && strcmp(command, "list") == 0) {
@@ -4075,16 +3950,7 @@ static void cmd_drivers(char* args) {
             return;
         }
 
-        print_driver_choices_for_subsystem("network");
-        print_newline();
-        print_newline();
-        print_driver_choices_for_subsystem("wifi");
-        print_newline();
-        print_newline();
-        print_driver_choices_for_subsystem("storage");
-        print_newline();
-        print_newline();
-        print_driver_choices_for_subsystem("usb");
+        print_all_subsystem_driver_choices();
         return;
     } else if (command && (strcmp(command, "choose") == 0 || strcmp(command, "select") == 0)) {
         subsystem = args ? next_token(&args) : 0;
