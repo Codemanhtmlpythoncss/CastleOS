@@ -121,6 +121,23 @@ static int restore_selected_driver(char* selected,
     return 0;
 }
 
+static void ensure_selected_driver(char* selected,
+                                   char options[][DRIVER_NAME_SIZE],
+                                   int count,
+                                   const char* preferred) {
+    if (selected[0] != '\0') {
+        return;
+    }
+
+    if (restore_selected_driver(selected, options, count, preferred)) {
+        return;
+    }
+
+    if (count > 0) {
+        copy_string(selected, DRIVER_NAME_SIZE, options[0]);
+    }
+}
+
 static int is_supported_e1000(uint16_t vendor_id, uint16_t device_id) {
     if (vendor_id != PCI_VENDOR_INTEL) {
         return 0;
@@ -461,6 +478,19 @@ void drivers_rescan() {
                             usb_driver_options,
                             usb_driver_option_count,
                             previous_usb);
+
+    ensure_selected_driver(network_selected_driver,
+                           network_driver_options,
+                           network_driver_option_count,
+                           network_recommended_driver);
+    ensure_selected_driver(storage_selected_driver,
+                           storage_driver_options,
+                           storage_driver_option_count,
+                           storage_recommended_driver);
+    ensure_selected_driver(usb_selected_driver,
+                           usb_driver_options,
+                           usb_driver_option_count,
+                           usb_recommended_driver);
 }
 
 void drivers_init() {

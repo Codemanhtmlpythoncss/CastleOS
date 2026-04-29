@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "network.h"
+#include "drivers.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA 0xCFC
@@ -221,6 +222,23 @@ static int strcmp_local(char* a, char* b) {
     return a[i] - b[i];
 }
 
+static int string_equals(const char* a, const char* b) {
+    if (!a || !b) {
+        return 0;
+    }
+
+    while (*a && *b) {
+        if (*a != *b) {
+            return 0;
+        }
+
+        a++;
+        b++;
+    }
+
+    return *a == '\0' && *b == '\0';
+}
+
 static void clear_wifi_driver_options() {
     status.wifi_driver_option_count = 0;
 
@@ -278,7 +296,6 @@ static void configure_wifi_driver_options(uint16_t vendor_id) {
 
     if (vendor_id == PCI_VENDOR_MEDIATEK || vendor_id == PCI_VENDOR_RALINK) {
         add_wifi_driver_option("mt76");
-        add_wifi_driver_option("rt2800pci");
         add_wifi_driver_option("generic-pci-wifi");
         copy_string(status.wifi_recommended_driver, sizeof(status.wifi_recommended_driver), "mt76");
         return;
@@ -601,6 +618,10 @@ void network_wifi_rescan() {
 
                 status.wifi_driver_selected = 0;
                 status.wifi_selected_driver[0] = '\0';
+
+                if (status.wifi_recommended_driver[0] != '\0') {
+                    network_wifi_select_driver(status.wifi_recommended_driver);
+                }
                 return;
             }
         }
@@ -777,6 +798,45 @@ static int e1000_init(uint8_t bus, uint8_t slot, uint8_t function) {
     packet_driver_kind = NETWORK_PACKET_DRIVER_E1000;
     copy_string(status.packet_driver_name, sizeof(status.packet_driver_name), "e1000");
     return 1;
+}
+
+static int network_try_driver_for_device(const char* driver_name,
+                                         uint16_t vendor_id,
+                                         uint16_t device_id,
+                                         uint8_t bus,
+                                         uint8_t slot,
+                                         uint8_t function) {
+    if (!driver_name || driver_name[0] == '\0') {
+        return 0;
+    }
+
+    if (string_equals(driver_name, "rtl8139")) {
+        if (vendor_id == RTL8139_VENDOR_ID && device_id == RTL8139_DEVICE_ID) {
+            return rtl8139_init(bus, slot, function);
+        }
+
+        return 0;
+    }
+
+    if (string_equals(driver_name, "e1000")) {
+        if (is_supported_e1000(vendor_id, device_id)) {
+            return e1000_init(bus, slot, function);
+        }
+
+        return 0;
+    }
+
+    if (string_equals(driver_name, "generic-ethernet-pci")) {
+        if (vendor_id == RTL8139_VENDOR_ID && device_id == RTL8139_DEVICE_ID && rtl8139_init(bus, slot, function)) {
+            return 1;
+        }
+
+        if (is_supported_e1000(vendor_id, device_id) && e1000_init(bus, slot, function)) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static int network_packet_available() {
@@ -1081,6 +1141,9 @@ static int wait_for_icmp_reply(uint32_t target_ip, uint16_t sequence) {
 
 void network_init() {
     struct NetworkStatus previous = status;
+    char* selected_driver;
+    char* recommended_driver;
+    char* preferred_driver;
 
     clear_network_status();
 
@@ -1088,6 +1151,12 @@ void network_init() {
         status.wifi_profile_saved = 1;
         copy_string(status.wifi_ssid, sizeof(status.wifi_ssid), previous.wifi_ssid);
     }
+
+    selected_driver = drivers_selected_driver("network");
+    recommended_driver = drivers_recommended_driver("network");
+    preferred_driver = (selected_driver && selected_driver[0] != '\0')
+        ? selected_driver
+        : recommended_driver;
 
     for (uint16_t bus = 0; bus < 256; bus++) {
         for (uint8_t slot = 0; slot < 32; slot++) {
@@ -1122,13 +1191,20 @@ void network_init() {
 
                 status.device_count++;
 
-                if (vendor_id == RTL8139_VENDOR_ID && device_id == RTL8139_DEVICE_ID) {
-                    rtl8139_init((uint8_t) bus, slot, function);
-                    continue;
-                }
-
-                if (is_supported_e1000(vendor_id, device_id)) {
-                    e1000_init((uint8_t) bus, slot, function);
+                if (!status.packet_driver_ready) {
+                    if (!network_try_driver_for_device(preferred_driver,
+                                                       vendor_id,
+                                                       device_id,
+                                                       (uint8_t) bus,
+                                                       slot,
+                                                       function)) {
+                        network_try_driver_for_device("generic-ethernet-pci",
+                                                      vendor_id,
+                                                      device_id,
+                                                      (uint8_t) bus,
+                                                      slot,
+                                                      function);
+                    }
                 }
             }
         }
