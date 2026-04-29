@@ -17,5 +17,6 @@ enum {
 };
 
 int keyboard_getkey();
+void keyboard_init();
 
 #endif

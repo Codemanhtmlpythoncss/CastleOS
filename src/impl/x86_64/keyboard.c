@@ -12,8 +12,78 @@ static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
 }
 
+static int keyboard_wait_input_clear() {
+    uint32_t attempts = 1000000;
+
+    while ((inb(0x64) & 0x02) != 0) {
+        if (attempts-- == 0) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int keyboard_wait_output_full() {
+    uint32_t attempts = 1000000;
+
+    while ((inb(0x64) & 0x01) == 0) {
+        if (attempts-- == 0) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 static void keyboard_debounce() {
-    timer_wait(2000);
+}
+
+void keyboard_init() {
+    uint8_t config;
+
+    if (!keyboard_wait_input_clear()) {
+        return;
+    }
+
+    outb(0x64, 0xAD);
+
+    if (!keyboard_wait_input_clear()) {
+        return;
+    }
+
+    outb(0x64, 0x20);
+    if (!keyboard_wait_output_full()) {
+        return;
+    }
+
+    config = inb(0x60);
+
+    config |= 0x01;
+    config &= (uint8_t) ~0x10;
+
+    if (!keyboard_wait_input_clear()) {
+        return;
+    }
+
+    outb(0x64, 0x60);
+    if (!keyboard_wait_input_clear()) {
+        return;
+    }
+
+    outb(0x60, config);
+
+    if (!keyboard_wait_input_clear()) {
+        return;
+    }
+
+    outb(0x64, 0xAE);
+
+    if (!keyboard_wait_output_full()) {
+        return;
+    }
+
+    (void) inb(0x60);
 }
 
 static char normal_table[128] = {
