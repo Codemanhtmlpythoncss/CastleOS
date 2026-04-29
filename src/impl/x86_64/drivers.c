@@ -256,7 +256,7 @@ static void configure_usb_driver_options() {
     if (usb_recommended_driver[0] == '\0') {
         copy_string(usb_recommended_driver, DRIVER_NAME_SIZE, "generic-usb-host");
     }
-}}
+}
 
 static uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
     uint32_t address = 0x80000000
