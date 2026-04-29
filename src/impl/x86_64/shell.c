@@ -2387,8 +2387,11 @@ static void cmd_net_config() {
     choice = install_read_choice("Net config 1) Status 2) DHCP 3) Static 4) Down 5) Rescan [1]: ", '1');
 
     if (choice == '2') {
-        network_enable_dhcp();
-        print_str("Network set to DHCP");
+        if (network_enable_dhcp()) {
+            print_str("DHCP lease acquired");
+        } else {
+            print_str("DHCP failed: no lease received");
+        }
         print_newline();
         print_network_status();
         return;
@@ -3058,6 +3061,7 @@ static void cmd_install(char* args) {
     char gateway[NETWORK_MAX_IP_LENGTH] = "10.0.2.2";
     char wifi_ssid[NETWORK_MAX_SSID_LENGTH];
     char wifi_password[SHELL_PASSWORD_SIZE];
+    int dhcp_configured = 0;
 
     (void) args;
     wifi_ssid[0] = '\0';
@@ -3122,7 +3126,7 @@ static void cmd_install(char* args) {
 
     print_str("Default shell: CastleBash");
     print_newline();
-    network_choice = install_read_choice("Networking 1) DHCP 2) Static 3) WiFi 4) Off [1]: ", '1');
+    network_choice = install_read_choice("Networking 1) Ethernet DHCP 2) Ethernet Static 3) WiFi 4) Off [1]: ", '1');
 
     if (network_choice == '2') {
         print_str("IP [10.0.2.15]: ");
@@ -3143,6 +3147,8 @@ static void cmd_install(char* args) {
             copy_string(gateway, sizeof(gateway), skip_spaces(line));
         }
     } else if (network_choice == '3') {
+        print_str("WiFi network scanning is not implemented yet on the current wireless stack.");
+        print_newline();
         print_str("WiFi SSID: ");
         shell_read_line(line, sizeof(line));
         if (skip_spaces(line)) {
@@ -3263,7 +3269,7 @@ static void cmd_install(char* args) {
     } else if (network_choice == '4') {
         network_disable();
     } else {
-        network_enable_dhcp();
+        dhcp_configured = network_enable_dhcp();
     }
 
     if (!write_install_image(selected_target, network_choice, ip, netmask, gateway, wifi_ssid)) {
@@ -3285,6 +3291,10 @@ static void cmd_install(char* args) {
     print_str("Install image bytes: ");
     print_u64((uint64_t) selected_target->installed_bytes);
     print_newline();
+    if (network_choice == '1' && !dhcp_configured) {
+        print_str("DHCP warning: no lease was acquired during install");
+        print_newline();
+    }
     print_network_status();
 }
 
@@ -3313,8 +3323,11 @@ static void cmd_net(char* args) {
     }
 
     if (strcmp(command, "up") == 0 || strcmp(command, "dhcp") == 0) {
-        network_enable_dhcp();
-        print_str("Network set to DHCP");
+        if (network_enable_dhcp()) {
+            print_str("DHCP lease acquired");
+        } else {
+            print_str("DHCP failed: no lease received");
+        }
         print_newline();
         print_network_status();
         return;

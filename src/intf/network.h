@@ -64,7 +64,7 @@ struct NetworkStatus {
 
 void network_init();
 void network_wifi_rescan();
-void network_enable_dhcp();
+int network_enable_dhcp();
 void network_set_static(char* ip, char* netmask, char* gateway);
 void network_disable();
 int network_wifi_connect(char* ssid, char* password);
