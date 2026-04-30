@@ -134,6 +134,7 @@
 #define NETWORK_PACKET_DRIVER_E1000 2
 #define NETWORK_PACKET_DRIVER_WIFI_SIM 3
 #define NETWORK_PACKET_DRIVER_LENOVO_14W_WIFI 4
+#define NETWORK_PACKET_DRIVER_ATH10K_QCA6174_PROBE 5
 
 struct E1000TxDescriptor {
     uint64_t address;
@@ -168,6 +169,7 @@ static uint16_t rtl_rx_offset;
 static uint8_t rtl_current_tx;
 static uint16_t e1000_io_base;
 static volatile uint8_t* e1000_mmio_base;
+static volatile uint8_t* qca6174_mmio_base;
 static uint8_t packet_driver_kind;
 static uint8_t e1000_rx_index;
 static uint8_t e1000_tx_index;
@@ -186,11 +188,12 @@ static uint8_t e1000_tx_buffers[E1000_TX_DESC_COUNT][E1000_BUFFER_SIZE] __attrib
 static void process_incoming_arp(uint8_t* packet, uint16_t length);
 static int wifi_can_use_simulated_link();
 static void enable_wifi_simulated_link();
-static int lenovo_14w_wifi_init(uint16_t vendor_id,
-                                uint16_t device_id,
-                                uint8_t bus,
-                                uint8_t slot,
-                                uint8_t function);
+static int qca6174_probe(uint16_t vendor_id,
+                         uint16_t device_id,
+                         uint8_t bus,
+                         uint8_t slot,
+                         uint8_t function,
+                         const char* driver_name);
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -363,6 +366,12 @@ static int wifi_selected_driver_is_lenovo_14w() {
     return string_equals(status.wifi_selected_driver, "lenovo-14w-wifi");
 }
 
+static int wifi_selected_driver_is_qca6174() {
+    return string_equals(status.wifi_selected_driver, "ath10k-qca6174")
+        || string_equals(status.wifi_selected_driver, "ath10k")
+        || string_equals(status.wifi_selected_driver, "lenovo-14w-wifi");
+}
+
 static void configure_wifi_driver_options(uint16_t vendor_id, uint16_t device_id) {
     clear_wifi_driver_options();
     status.wifi_recommended_driver[0] = '\0';
@@ -373,11 +382,12 @@ static void configure_wifi_driver_options(uint16_t vendor_id, uint16_t device_id
 
     if (vendor_id == PCI_VENDOR_ATHEROS || vendor_id == PCI_VENDOR_QUALCOMM_ATHEROS) {
         if (device_id == QUALCOMM_QCA6174_DEVICE_ID) {
-            add_wifi_driver_option("lenovo-14w-wifi");
+            add_wifi_driver_option("ath10k-qca6174");
             add_wifi_driver_option("ath10k");
+            add_wifi_driver_option("lenovo-14w-wifi");
             add_wifi_driver_option("ath9k");
             add_wifi_driver_option("generic-pci-wifi");
-            set_wifi_recommended_driver("lenovo-14w-wifi");
+            set_wifi_recommended_driver("ath10k-qca6174");
             return;
         }
 
@@ -753,6 +763,7 @@ static void clear_network_status() {
     rtl_current_tx = 0;
     e1000_io_base = 0;
     e1000_mmio_base = 0;
+    qca6174_mmio_base = 0;
     packet_driver_kind = NETWORK_PACKET_DRIVER_NONE;
     e1000_rx_index = 0;
     e1000_tx_index = 0;
@@ -1033,9 +1044,11 @@ static int network_try_driver_for_device(const char* driver_name,
         return 0;
     }
 
-    if (string_equals(driver_name, "lenovo-14w-wifi")) {
+    if (string_equals(driver_name, "ath10k-qca6174")
+        || string_equals(driver_name, "ath10k")
+        || string_equals(driver_name, "lenovo-14w-wifi")) {
         if (is_lenovo_14w_wifi_candidate(vendor_id, device_id)) {
-            return lenovo_14w_wifi_init(vendor_id, device_id, bus, slot, function);
+            return qca6174_probe(vendor_id, device_id, bus, slot, function, driver_name);
         }
 
         return 0;
@@ -1054,24 +1067,40 @@ static int network_try_driver_for_device(const char* driver_name,
     return 0;
 }
 
-static int lenovo_14w_wifi_init(uint16_t vendor_id,
-                                uint16_t device_id,
-                                uint8_t bus,
-                                uint8_t slot,
-                                uint8_t function) {
-    if (!is_lenovo_14w_wifi_candidate(vendor_id, device_id)) {
+static int qca6174_probe(uint16_t vendor_id,
+                         uint16_t device_id,
+                         uint8_t bus,
+                         uint8_t slot,
+                         uint8_t function,
+                         const char* driver_name) {
+    uint32_t bar0;
+    uint32_t command;
+    uintptr_t mmio_address;
+
+    if ((vendor_id != PCI_VENDOR_ATHEROS && vendor_id != PCI_VENDOR_QUALCOMM_ATHEROS)
+        || device_id != QUALCOMM_QCA6174_DEVICE_ID) {
         return 0;
     }
 
-    status.mac[0] = 0x02;
-    status.mac[1] = 0x14;
-    status.mac[2] = 0x4E;
-    status.mac[3] = (uint8_t) (vendor_id ^ device_id);
-    status.mac[4] = (uint8_t) ((vendor_id >> 8) ^ bus ^ function);
-    status.mac[5] = (uint8_t) ((device_id >> 8) ^ slot);
-    status.packet_driver_ready = 1;
-    packet_driver_kind = NETWORK_PACKET_DRIVER_LENOVO_14W_WIFI;
-    copy_string(status.packet_driver_name, sizeof(status.packet_driver_name), "lenovo-14w-wifi");
+    bar0 = pci_read32(bus, slot, function, 0x10);
+    if ((bar0 & 0x01) != 0) {
+        return 0;
+    }
+
+    mmio_address = (uintptr_t) (bar0 & 0xFFFFFFF0);
+    if (mmio_address == 0 || mmio_address >= 0x40000000u) {
+        return 0;
+    }
+
+    command = pci_read32(bus, slot, function, 0x04);
+    pci_write32(bus, slot, function, 0x04, command | PCI_COMMAND_MEMORY | PCI_COMMAND_BUS_MASTER);
+
+    qca6174_mmio_base = (volatile uint8_t*) mmio_address;
+    status.packet_driver_ready = 0;
+    packet_driver_kind = NETWORK_PACKET_DRIVER_ATH10K_QCA6174_PROBE;
+    copy_string(status.packet_driver_name,
+                sizeof(status.packet_driver_name),
+                (char*) (driver_name && driver_name[0] ? driver_name : "ath10k-qca6174"));
     return 1;
 }
 
@@ -1757,13 +1786,14 @@ void network_init() {
 int network_enable_dhcp() {
     if (status.wifi_profile_saved
         && status.wifi_driver_selected
-        && wifi_selected_driver_is_lenovo_14w()
+        && wifi_selected_driver_is_qca6174()
         && !status.packet_driver_ready) {
-        lenovo_14w_wifi_init(status.first_wifi_device.vendor_id,
-                             status.first_wifi_device.device_id,
-                             status.first_wifi_device.bus,
-                             status.first_wifi_device.slot,
-                             status.first_wifi_device.function);
+        qca6174_probe(status.first_wifi_device.vendor_id,
+                      status.first_wifi_device.device_id,
+                      status.first_wifi_device.bus,
+                      status.first_wifi_device.slot,
+                      status.first_wifi_device.function,
+                      status.wifi_selected_driver);
     }
 
     if (wifi_can_use_simulated_link() && !status.packet_driver_ready) {
@@ -1777,7 +1807,8 @@ int network_enable_dhcp() {
         return 1;
     }
 
-    if (packet_driver_kind == NETWORK_PACKET_DRIVER_LENOVO_14W_WIFI) {
+    if (packet_driver_kind == NETWORK_PACKET_DRIVER_LENOVO_14W_WIFI
+        || packet_driver_kind == NETWORK_PACKET_DRIVER_ATH10K_QCA6174_PROBE) {
         status.enabled = 0;
         status.mode = NETWORK_MODE_DOWN;
         status.ip[0] = '\0';
@@ -1879,12 +1910,13 @@ int network_wifi_connect(char* ssid, char* password) {
         return 0;
     }
 
-    if (!status.packet_driver_ready && wifi_selected_driver_is_lenovo_14w()) {
-        lenovo_14w_wifi_init(status.first_wifi_device.vendor_id,
-                             status.first_wifi_device.device_id,
-                             status.first_wifi_device.bus,
-                             status.first_wifi_device.slot,
-                             status.first_wifi_device.function);
+    if (!status.packet_driver_ready && wifi_selected_driver_is_qca6174()) {
+        qca6174_probe(status.first_wifi_device.vendor_id,
+                      status.first_wifi_device.device_id,
+                      status.first_wifi_device.bus,
+                      status.first_wifi_device.slot,
+                      status.first_wifi_device.function,
+                      status.wifi_selected_driver);
     }
 
     if (!status.packet_driver_ready) {
@@ -1897,7 +1929,8 @@ int network_wifi_connect(char* ssid, char* password) {
 
 void network_wifi_disconnect() {
     if (packet_driver_kind == NETWORK_PACKET_DRIVER_WIFI_SIM
-        || packet_driver_kind == NETWORK_PACKET_DRIVER_LENOVO_14W_WIFI) {
+        || packet_driver_kind == NETWORK_PACKET_DRIVER_LENOVO_14W_WIFI
+        || packet_driver_kind == NETWORK_PACKET_DRIVER_ATH10K_QCA6174_PROBE) {
         status.packet_driver_ready = 0;
         packet_driver_kind = NETWORK_PACKET_DRIVER_NONE;
         status.packet_driver_name[0] = '\0';
@@ -2003,6 +2036,12 @@ char* network_driver_state() {
         return "no PCI network controller found";
     }
 
+    if (packet_driver_kind == NETWORK_PACKET_DRIVER_ATH10K_QCA6174_PROBE) {
+        return qca6174_mmio_base
+            ? "ath10k QCA6174 PCI device enabled, firmware loader and copy-engine TX/RX not implemented yet"
+            : "ath10k QCA6174 detected, BAR mapping unavailable";
+    }
+
     if (!status.packet_driver_ready) {
         return "network device found, no packet driver for it yet";
     }
@@ -2046,8 +2085,13 @@ char* network_wifi_state() {
     }
 
     if (!status.wifi_connected) {
+        if (string_equals(status.wifi_selected_driver, "ath10k-qca6174")
+            || string_equals(status.wifi_selected_driver, "ath10k")) {
+            return "WiFi profile saved, ath10k QCA6174 PCI probe complete, firmware loading and TX/RX not implemented yet";
+        }
+
         if (string_equals(status.wifi_selected_driver, "lenovo-14w-wifi")) {
-            return "WiFi profile saved, Lenovo 14w driver profile selected, chipset bring-up and firmware loading not implemented yet";
+            return "WiFi profile saved, Lenovo 14w Qualcomm profile selected, firmware loading and TX/RX not implemented yet";
         }
 
         if (string_equals(status.wifi_selected_driver, "hp-stream-14-wifi")) {
