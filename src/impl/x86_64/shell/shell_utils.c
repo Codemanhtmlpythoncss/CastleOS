@@ -30,6 +30,8 @@ void append_string(char* destination, size_t destination_size, const char* sourc
     size_t i = 0;
 
     if (length >= destination_size) {
+    
+    
         return;
     }
 

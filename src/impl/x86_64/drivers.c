@@ -23,13 +23,20 @@
 #define RTL8111_DEVICE_ID_3 0x8211
 #define RTL8111_DEVICE_ID_4 0x8411
 #define PCI_VENDOR_INTEL 0x8086
+#define PCI_VENDOR_ATHEROS 0x168c
+#define PCI_VENDOR_QUALCOMM_ATHEROS 0x17cb
 #define E1000_DEVICE_ID_82540EM 0x100E
 #define E1000_DEVICE_ID_82545EM 0x100F
 #define E1000_DEVICE_ID_82543GC 0x1004
 #define E1000_DEVICE_ID_82541GI 0x1076
 #define MEDIATEK_VENDOR_ID 0x14c3
 #define MT7922_DEVICE_ID 0x7922
+#define QUALCOMM_QCA6174_DEVICE_ID 0x003e
+#define REALTEK_8822BE_DEVICE_ID 0xb822
+#define REALTEK_8821CE_DEVICE_ID 0xc821
 #define REALTEK_8822CE_DEVICE_ID 0xc822
+#define BROADCOM_VENDOR_ID 0x14e4
+#define BROADCOM_BCM43142_DEVICE_ID 0x4365
 #define DRIVER_OPTION_MAX_COUNT 8
 
 static struct DriverStatus status;
@@ -167,6 +174,20 @@ static int is_supported_mt7922(uint16_t vendor_id, uint16_t device_id) {
 
 static int is_supported_rtl8822ce(uint16_t vendor_id, uint16_t device_id) {
     return vendor_id == RTL8139_VENDOR_ID && device_id == REALTEK_8822CE_DEVICE_ID;
+}
+
+static int is_hp_stream_14_wifi_candidate(uint16_t vendor_id, uint16_t device_id) {
+    if (vendor_id == RTL8139_VENDOR_ID) {
+        return device_id == REALTEK_8822BE_DEVICE_ID
+            || device_id == REALTEK_8821CE_DEVICE_ID;
+    }
+
+    return vendor_id == BROADCOM_VENDOR_ID && device_id == BROADCOM_BCM43142_DEVICE_ID;
+}
+
+static int is_supported_qca6174(uint16_t vendor_id, uint16_t device_id) {
+    return (vendor_id == PCI_VENDOR_ATHEROS || vendor_id == PCI_VENDOR_QUALCOMM_ATHEROS)
+        && device_id == QUALCOMM_QCA6174_DEVICE_ID;
 }
 
 static void configure_network_driver_options() {
@@ -351,6 +372,7 @@ static void clear_status() {
     status.rtl8822ce_loaded = 0;
     status.usb_hub_stack_modeled = 0;
     status.lenovo_14w_profile_suggested = 0;
+    status.hp_stream_14_profile_suggested = 0;
     status.storage_driver_loaded = 0;
     status.wireless_driver_loaded = 0;
     clear_device(&status.first_network);
@@ -468,7 +490,11 @@ void drivers_rescan() {
     configure_storage_driver_options();
     configure_usb_driver_options();
     status.usb_hub_stack_modeled = status.usb_controllers > 0;
-    status.lenovo_14w_profile_suggested = status.mt7922_loaded || status.rtl8822ce_loaded;
+    status.lenovo_14w_profile_suggested = status.mt7922_loaded
+        || status.rtl8822ce_loaded
+        || is_supported_qca6174(status.first_wireless.vendor_id, status.first_wireless.device_id);
+    status.hp_stream_14_profile_suggested =
+        is_hp_stream_14_wifi_candidate(status.first_wireless.vendor_id, status.first_wireless.device_id);
 
     if (!restore_selected_driver(network_selected_driver,
                                  network_driver_options,
@@ -648,6 +674,10 @@ char* drivers_wireless_state() {
 
     if (status.lenovo_14w_profile_suggested) {
         return "wireless controller detected, Lenovo 14w profile suggested; chipset data path and firmware loader not implemented yet";
+    }
+
+    if (status.hp_stream_14_profile_suggested) {
+        return "wireless controller detected, HP Stream 14 profile suggested; chipset data path and firmware loader not implemented yet";
     }
 
     return "wireless controller detected, chipset driver and firmware loader not implemented yet";
