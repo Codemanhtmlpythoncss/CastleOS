@@ -1240,9 +1240,15 @@ static int write_install_image(struct InstallTarget* target,
         copy_string(target->installed_netmask, sizeof(target->installed_netmask), netmask);
         copy_string(target->installed_gateway, sizeof(target->installed_gateway), gateway);
     } else if (network_choice == '3') {
-        copy_string(target->installed_network_mode, sizeof(target->installed_network_mode), "wifi");
+        copy_string(target->installed_network_mode, sizeof(target->installed_network_mode), "wifi-dhcp");
         copy_string(target->installed_wifi_ssid, sizeof(target->installed_wifi_ssid), wifi_ssid);
     } else if (network_choice == '4') {
+        copy_string(target->installed_network_mode, sizeof(target->installed_network_mode), "wifi-static");
+        copy_string(target->installed_ip, sizeof(target->installed_ip), ip);
+        copy_string(target->installed_netmask, sizeof(target->installed_netmask), netmask);
+        copy_string(target->installed_gateway, sizeof(target->installed_gateway), gateway);
+        copy_string(target->installed_wifi_ssid, sizeof(target->installed_wifi_ssid), wifi_ssid);
+    } else if (network_choice == '5') {
         copy_string(target->installed_network_mode, sizeof(target->installed_network_mode), "off");
     } else {
         copy_string(target->installed_network_mode, sizeof(target->installed_network_mode), "dhcp");
@@ -1770,6 +1776,10 @@ static void print_driver_status() {
     print_str(status.lenovo_14w_profile_suggested ? "suggested" : "not detected");
     print_newline();
 
+    print_str("HP Stream 14 profile: ");
+    print_str(status.hp_stream_14_profile_suggested ? "suggested" : "not detected");
+    print_newline();
+
     print_str("Driver selections: net ");
     print_str(drivers_selected_driver("network")[0] ? drivers_selected_driver("network") : "(none)");
     print_str(" wifi ");
@@ -1975,7 +1985,7 @@ static void autoselect_install_drivers(char network_choice) {
 
     network_init();
 
-    if (network_choice == '3') {
+    if (network_choice == '3' || network_choice == '4') {
         driver_name = network_wifi_recommended_driver();
         if (driver_name && driver_name[0]) {
             network_wifi_select_driver(driver_name);
@@ -2326,10 +2336,18 @@ static void cmd_net_config() {
 }
 
 static void cmd_wifi_config() {
-    char choice = install_read_choice("WiFi config 1) Status 2) Scan 3) Drivers 4) Auto driver 5) Choose driver 6) Connect 7) Disconnect [1]: ", '1');
+    char choice = install_read_choice("WiFi config 1) Status 2) Scan 3) Drivers 4) Auto driver 5) Choose driver 6) Connect 7) Disconnect 8) Static IP [1]: ", '1');
     char ssid[NETWORK_MAX_SSID_LENGTH];
     char password[SHELL_PASSWORD_SIZE];
-    struct NetworkStatus current;
+    char line[SHELL_INPUT_SIZE];
+    char ip[NETWORK_MAX_IP_LENGTH];
+    char netmask[NETWORK_MAX_IP_LENGTH];
+    char gateway[NETWORK_MAX_IP_LENGTH];
+    struct NetworkStatus current = network_get_status();
+
+    copy_string(ip, sizeof(ip), current.ip[0] ? current.ip : "10.0.2.15");
+    copy_string(netmask, sizeof(netmask), current.netmask[0] ? current.netmask : "255.255.255.0");
+    copy_string(gateway, sizeof(gateway), current.gateway[0] ? current.gateway : "10.0.2.2");
 
     if (choice == '2') {
         drivers_rescan();
@@ -2392,6 +2410,38 @@ static void cmd_wifi_config() {
     if (choice == '7') {
         network_wifi_disconnect();
         print_str("WiFi disconnected");
+        return;
+    }
+
+    if (choice == '8') {
+        print_str("IP [");
+        print_str(ip);
+        print_str("]: ");
+        shell_read_line(line, sizeof(line));
+        if (skip_spaces(line)) {
+            copy_string(ip, sizeof(ip), skip_spaces(line));
+        }
+
+        print_str("Netmask [");
+        print_str(netmask);
+        print_str("]: ");
+        shell_read_line(line, sizeof(line));
+        if (skip_spaces(line)) {
+            copy_string(netmask, sizeof(netmask), skip_spaces(line));
+        }
+
+        print_str("Gateway [");
+        print_str(gateway);
+        print_str("]: ");
+        shell_read_line(line, sizeof(line));
+        if (skip_spaces(line)) {
+            copy_string(gateway, sizeof(gateway), skip_spaces(line));
+        }
+
+        network_set_static(ip, netmask, gateway);
+        print_str("WiFi static network settings saved");
+        print_newline();
+        print_network_status();
         return;
     }
 
@@ -2998,9 +3048,9 @@ static void cmd_install(char* args) {
 
     print_str("Default shell: CastleBash");
     print_newline();
-    network_choice = install_read_choice("Networking 1) Ethernet DHCP 2) Ethernet Static 3) WiFi 4) Off [1]: ", '1');
+    network_choice = install_read_choice("Networking 1) Ethernet DHCP 2) Ethernet Static 3) WiFi DHCP 4) WiFi Static 5) Off [1]: ", '1');
 
-    if (network_choice == '2') {
+    if (network_choice == '2' || network_choice == '4') {
         print_str("IP [10.0.2.15]: ");
         shell_read_line(line, sizeof(line));
         if (skip_spaces(line)) {
@@ -3018,7 +3068,9 @@ static void cmd_install(char* args) {
         if (skip_spaces(line)) {
             copy_string(gateway, sizeof(gateway), skip_spaces(line));
         }
-    } else if (network_choice == '3') {
+    }
+
+    if (network_choice == '3' || network_choice == '4') {
         print_str("WiFi network scanning is not implemented yet on the current wireless stack.");
         print_newline();
         print_str("WiFi SSID: ");
@@ -3053,6 +3105,11 @@ static void cmd_install(char* args) {
         print_str("wifi dhcp ");
         print_str(wifi_ssid[0] ? wifi_ssid : "(no ssid)");
     } else if (network_choice == '4') {
+        print_str("wifi static ");
+        print_str(wifi_ssid[0] ? wifi_ssid : "(no ssid)");
+        print_str(" ");
+        print_str(ip);
+    } else if (network_choice == '5') {
         print_str("off");
     } else {
         print_str("dhcp");
@@ -3100,6 +3157,15 @@ static void cmd_install(char* args) {
             } else if (network_choice == '3') {
                 copy_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "mode=wifi-dhcp\n");
             } else if (network_choice == '4') {
+                copy_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "mode=wifi-static\n");
+                append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "ip=");
+                append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), ip);
+                append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "\nnetmask=");
+                append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), netmask);
+                append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "\ngateway=");
+                append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), gateway);
+                append_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "\n");
+            } else if (network_choice == '5') {
                 copy_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "mode=down\n");
             } else {
                 copy_string(vfs_nodes[network_file].content, sizeof(vfs_nodes[network_file].content), "mode=dhcp\n");
@@ -3136,7 +3202,7 @@ static void cmd_install(char* args) {
 
     autoselect_install_drivers(network_choice);
 
-    if (network_choice == '3') {
+    if (network_choice == '3' || network_choice == '4') {
         struct NetworkStatus install_network_status = network_get_status();
 
         if (!install_network_status.wifi_driver_selected) {
@@ -3151,6 +3217,9 @@ static void cmd_install(char* args) {
         network_wifi_connect(wifi_ssid, wifi_password);
         dhcp_configured = network_enable_dhcp();
     } else if (network_choice == '4') {
+        network_wifi_connect(wifi_ssid, wifi_password);
+        network_set_static(ip, netmask, gateway);
+    } else if (network_choice == '5') {
         network_disable();
     } else {
         dhcp_configured = network_enable_dhcp();
@@ -3175,7 +3244,7 @@ static void cmd_install(char* args) {
     print_str("Install image bytes: ");
     print_u64((uint64_t) selected_target->installed_bytes);
     print_newline();
-    if (network_choice == '1' && !dhcp_configured) {
+    if ((network_choice == '1' || network_choice == '3') && !dhcp_configured) {
         print_str("DHCP warning: no lease was acquired during install");
         print_newline();
     }
@@ -3416,8 +3485,25 @@ static void cmd_wifi(char* args) {
         return;
     }
 
+    if (strcmp(command, "static") == 0) {
+        char* ip = next_token(&args);
+        char* netmask = next_token(&args);
+        char* gateway = next_token(&args);
+
+        if (!ip || !netmask || !gateway) {
+            print_str("Usage: wifi static <ip> <netmask> <gateway>");
+            return;
+        }
+
+        network_set_static(ip, netmask, gateway);
+        print_str("WiFi static network settings saved");
+        print_newline();
+        print_network_status();
+        return;
+    }
+
     if (strcmp(command, "connect") != 0) {
-        print_str("Usage: wifi [status|scan|drivers|driver <name>|driver auto|connect <ssid>|disconnect|config]");
+        print_str("Usage: wifi [status|scan|drivers|driver <name>|driver auto|connect <ssid>|static <ip> <netmask> <gateway>|disconnect|config]");
         return;
     }
 

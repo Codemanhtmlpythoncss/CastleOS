@@ -41,6 +41,7 @@ struct DriverStatus {
     int rtl8822ce_loaded;
     int usb_hub_stack_modeled;
     int lenovo_14w_profile_suggested;
+    int hp_stream_14_profile_suggested;
     int storage_driver_loaded;
     int wireless_driver_loaded;
     struct DriverPciDevice first_network;
