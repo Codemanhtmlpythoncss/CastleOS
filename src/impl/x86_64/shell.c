@@ -171,6 +171,7 @@ static int command_is_available(struct Command* command);
 static void print_pci_device(struct DriverPciDevice device);
 static void print_driver_status();
 static void print_network_status();
+static int print_ping_result(char* target, int result, uint64_t sequence);
 static void print_ssh_status();
 static void print_driver_choices_for_subsystem(char* subsystem);
 static int select_driver_for_subsystem(char* subsystem, char* driver_name);
@@ -2272,7 +2273,7 @@ static void cmd_net_config() {
     copy_string(netmask, sizeof(netmask), current.netmask[0] ? current.netmask : "255.255.255.0");
     copy_string(gateway, sizeof(gateway), current.gateway[0] ? current.gateway : "10.0.2.2");
 
-    choice = install_read_choice("Net config 1) Status 2) DHCP 3) Static 4) Down 5) Rescan [1]: ", '1');
+    choice = install_read_choice("Net config 1) Status 2) DHCP 3) Static 4) Down 5) Rescan 6) Connect+Ping [1]: ", '1');
 
     if (choice == '2') {
         if (network_enable_dhcp()) {
@@ -2329,6 +2330,29 @@ static void cmd_net_config() {
         print_str("Driver and PCI network scan complete");
         print_newline();
         print_network_status();
+        return;
+    }
+
+    if (choice == '6') {
+        copy_string(ip, sizeof(ip), "1.1.1.1");
+        print_str("Ping target [1.1.1.1]: ");
+        shell_read_line(line, sizeof(line));
+        if (skip_spaces(line)) {
+            copy_string(ip, sizeof(ip), skip_spaces(line));
+        }
+
+        if (!network_enable_dhcp()) {
+            print_str("connect: DHCP failed");
+            print_newline();
+            print_network_status();
+            return;
+        }
+
+        print_str("DHCP lease acquired");
+        print_newline();
+        print_network_status();
+        print_newline();
+        print_ping_result(ip, network_ping(ip), 1);
         return;
     }
 
@@ -3286,6 +3310,30 @@ static void cmd_net(char* args) {
         return;
     }
 
+    if (strcmp(command, "connect") == 0) {
+        char* target = args ? next_token(&args) : 0;
+        int result;
+
+        if (!target) {
+            target = "1.1.1.1";
+        }
+
+        if (!network_enable_dhcp()) {
+            print_str("connect: DHCP failed");
+            print_newline();
+            print_network_status();
+            return;
+        }
+
+        print_str("DHCP lease acquired");
+        print_newline();
+        print_network_status();
+        print_newline();
+        result = network_ping(target);
+        print_ping_result(target, result, 1);
+        return;
+    }
+
     if (strcmp(command, "down") == 0) {
         network_disable();
         print_str("Network interface down");
@@ -3309,45 +3357,83 @@ static void cmd_net(char* args) {
         return;
     }
 
-    print_str("Usage: net [status|rescan|up|dhcp|down|static|config]");
+    print_str("Usage: net [status|rescan|up|dhcp|connect [ipv4]|down|static|config]");
+}
+
+static int print_ping_result(char* target, int result, uint64_t sequence) {
+    if (result == NETWORK_PING_DOWN) {
+        print_str("ping: network is down");
+        return 0;
+    }
+
+    if (result == NETWORK_PING_NO_PACKET_DRIVER) {
+        print_str("ping: no packet driver loaded");
+        return 0;
+    }
+
+    if (result == NETWORK_PING_BAD_TARGET) {
+        print_str("ping: target must be an IPv4 address");
+        return 0;
+    }
+
+    if (result == NETWORK_PING_ARP_TIMEOUT) {
+        print_str("ping: ARP timeout");
+        return 0;
+    }
+
+    if (result == NETWORK_PING_TIMEOUT) {
+        print_str("ping: ICMP timeout");
+        return 0;
+    }
+
+    print_str("reply from ");
+    print_str(target);
+    print_str(": icmp_seq=");
+    print_u64(sequence);
+    return 1;
 }
 
 static void cmd_ping(char* args) {
-    int result;
+    char* target;
+    uint64_t received = 0;
+    uint64_t transmitted = 0;
 
     if (!args) {
         print_str("Usage: ping <ipv4>");
         return;
     }
 
-    result = network_ping(args);
-
-    if (result == NETWORK_PING_DOWN) {
-        print_str("ping: network is down");
+    target = next_token(&args);
+    if (!target) {
+        print_str("Usage: ping <ipv4>");
         return;
     }
 
-    if (result == NETWORK_PING_NO_PACKET_DRIVER) {
-        print_str("ping: no packet driver loaded");
-        return;
+    for (uint64_t sequence = 1; sequence <= 4; sequence++) {
+        int result = network_ping(target);
+        transmitted++;
+
+        if (print_ping_result(target, result, sequence)) {
+            received++;
+        }
+
+        print_newline();
+
+        if (result == NETWORK_PING_DOWN
+            || result == NETWORK_PING_NO_PACKET_DRIVER
+            || result == NETWORK_PING_BAD_TARGET) {
+            break;
+        }
     }
 
-    if (result == NETWORK_PING_BAD_TARGET) {
-        print_str("ping: target must be an IPv4 address");
-        return;
-    }
-
-    if (result == NETWORK_PING_ARP_TIMEOUT) {
-        print_str("ping: ARP timeout");
-        return;
-    }
-
-    if (result == NETWORK_PING_TIMEOUT) {
-        print_str("ping: ICMP timeout");
-        return;
-    }
-
-    print_str("ping: reply received");
+    print_str("--- ");
+    print_str(target);
+    print_str(" ping statistics ---");
+    print_newline();
+    print_u64(transmitted);
+    print_str(" packets transmitted, ");
+    print_u64(received);
+    print_str(" received");
 }
 
 static void print_wifi_driver_options() {
