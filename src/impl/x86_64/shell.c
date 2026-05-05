@@ -5,6 +5,7 @@
 #include "shell_utils.h"
 #include "shell_format.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "network.h"
 #include "print.h"
 
@@ -23,6 +24,12 @@
 #define INSTALL_LABEL_SIZE 32
 #define INSTALL_LOCATION_SIZE 96
 #define INSTALL_MANIFEST_SIZE 16384
+#define BROWSER_HISTORY_SIZE 16
+#define BROWSER_LOCATION_SIZE 64
+#define BROWSER_STATUS_SIZE 80
+#define BROWSER_BUTTON_MAX 7
+#define BROWSER_BODY_LINE_COUNT 18
+#define BROWSER_BODY_LINE_SIZE 77
 #define MULTIBOOT_TAG_END 0
 #define MULTIBOOT_TAG_BASIC_MEMINFO 4
 #define MULTIBOOT_TAG_MMAP 6
@@ -38,6 +45,18 @@
 #define COMMAND_SHELL_CLASSIC 0x01
 #define COMMAND_SHELL_BASH 0x02
 #define COMMAND_REQUIRES_INSTALL 0x04
+#define BROWSER_PAGE_HOME 0
+#define BROWSER_PAGE_NETWORK 1
+#define BROWSER_PAGE_INSTALL 2
+#define BROWSER_PAGE_HELP 3
+#define BROWSER_PAGE_REMOTE 4
+#define BROWSER_ACTION_BACK 0
+#define BROWSER_ACTION_FORWARD 1
+#define BROWSER_ACTION_HOME 2
+#define BROWSER_ACTION_NETWORK 3
+#define BROWSER_ACTION_INSTALL 4
+#define BROWSER_ACTION_HELP 5
+#define BROWSER_ACTION_QUIT 6
 
 struct Command {
     char* name;
@@ -104,6 +123,26 @@ struct InstallTarget {
     char manifest[INSTALL_MANIFEST_SIZE];
 };
 
+struct BrowserButton {
+    char* label;
+    int action;
+    size_t x;
+    size_t y;
+    size_t width;
+};
+
+struct BrowserState {
+    int running;
+    int current_page;
+    int focus_index;
+    int history_pages[BROWSER_HISTORY_SIZE];
+    int history_count;
+    int history_index;
+    char location[BROWSER_LOCATION_SIZE];
+    char history_locations[BROWSER_HISTORY_SIZE][BROWSER_LOCATION_SIZE];
+    char status[BROWSER_STATUS_SIZE];
+};
+
 int strcmp(char* a, char* b);
 
 static uint64_t total_ram_bytes = 0;
@@ -149,7 +188,7 @@ static int vfs_resolve_parent(const char* path, int* parent, char* leaf_name);
 static void vfs_build_path(int node_index, char* buffer, size_t buffer_size);
 static void shell_print_prompt();
 static void shell_render_buffer(size_t start_col,
-                                size_t start_row,
+                                size_t start_abs_row,
                                 char* input,
                                 size_t length,
                                 size_t cursor_index,
@@ -194,6 +233,21 @@ static void print_install_target_summary(struct InstallTarget* target, int selec
 static void print_install_target_details(struct InstallTarget* target);
 static int interactive_select_driver_for_subsystem(char* subsystem);
 static char* interactive_pick_subsystem();
+static void print_string_at(size_t target_col, size_t target_row, char* text);
+static void fill_row(size_t target_row, char character);
+static void draw_box_line(size_t target_row, uint8_t foreground, uint8_t background);
+static int browser_page_from_location(char* location);
+static void browser_page_location(int page, char* location, size_t location_size);
+static void browser_sync_button_layout(struct BrowserButton buttons[], size_t* button_count);
+static int browser_button_at(struct BrowserButton buttons[], size_t button_count, size_t x, size_t y);
+static void browser_load_history_entry(struct BrowserState* state, int index);
+static void browser_open_page(struct BrowserState* state, int page, char* location, int push_history);
+static void browser_activate_action(struct BrowserState* state, int action);
+static void browser_build_lines(struct BrowserState* state,
+                                char lines[][BROWSER_BODY_LINE_SIZE],
+                                size_t* line_count);
+static void browser_render(struct BrowserState* state, struct MouseState* mouse_state);
+static void browser_run(char* location);
 static int maybe_run_config_flow(struct Command* command, char* args);
 static void cmd_net_config();
 static void cmd_wifi_config();
@@ -237,6 +291,7 @@ static void cmd_hostname(char* args);
 static void cmd_disk(char* args);
 static void cmd_drivers(char* args);
 static void cmd_pci(char* args);
+static void cmd_browser(char* args);
 static void cmd_shutdown(char* args);
 
 static struct Command commands[] = {
@@ -269,6 +324,7 @@ static struct Command commands[] = {
     {"disk", cmd_disk, "shows or selects an install disk or partition", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"drivers", cmd_drivers, "shows loaded and missing hardware drivers", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"pci", cmd_pci, "shows detected PCI hardware summary", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
+    {"browser", cmd_browser, "opens the CastleBrowse text browser", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"shutdown", cmd_shutdown, "powers off the machine", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
 };
 
@@ -1335,40 +1391,34 @@ static void shell_print_prompt() {
 }
 
 static void shell_render_buffer(size_t start_col,
-                                size_t start_row,
+                                size_t start_abs_row,
                                 char* input,
                                 size_t length,
                                 size_t cursor_index,
                                 size_t* rendered_length,
                                 int mask_input) {
     size_t screen_cols = print_get_num_cols();
-    size_t screen_rows = print_get_num_rows();
-    size_t max_cells = screen_cols * screen_rows;
-    size_t start = start_row * screen_cols + start_col;
+    size_t start = start_abs_row * screen_cols + start_col;
     size_t render_count = length > *rendered_length ? length : *rendered_length;
 
-    for (size_t i = 0; i < render_count && start + i < max_cells; i++) {
+    for (size_t i = 0; i < render_count; i++) {
         char character = i < length ? input[i] : ' ';
 
         if (mask_input && i < length) {
             character = '*';
         }
 
-        print_put_at((start + i) % screen_cols, (start + i) / screen_cols, character);
+        print_put_abs_at((start + i) % screen_cols, (start + i) / screen_cols, character);
     }
 
-    if (start + cursor_index >= max_cells) {
-        cursor_index = max_cells > start ? max_cells - start - 1 : 0;
-    }
-
-    print_set_cursor((start + cursor_index) % screen_cols, (start + cursor_index) / screen_cols);
+    print_set_cursor_abs((start + cursor_index) % screen_cols, (start + cursor_index) / screen_cols);
     *rendered_length = length;
 }
 
 static void shell_read_buffer(char* input, size_t input_size, int mask_input, int allow_history) {
     char saved_input[SHELL_INPUT_SIZE];
     size_t start_col = print_get_col();
-    size_t start_row = print_get_row();
+    size_t start_abs_row = print_get_abs_row();
     size_t length = 0;
     size_t cursor_index = 0;
     size_t rendered_length = 0;
@@ -1380,9 +1430,24 @@ static void shell_read_buffer(char* input, size_t input_size, int mask_input, in
     while (1) {
         int key = keyboard_getkey();
 
+        if (key == KEY_SHIFT_UP) {
+            print_scroll_view(-1);
+            continue;
+        }
+
+        if (key == KEY_SHIFT_DOWN) {
+            print_scroll_view(1);
+            continue;
+        }
+
+        if (print_is_scrolled()) {
+            print_follow_output();
+            shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
+        }
+
         if (key == KEY_ENTER) {
             input[length] = '\0';
-            shell_render_buffer(start_col, start_row, input, length, length, &rendered_length, mask_input);
+            shell_render_buffer(start_col, start_abs_row, input, length, length, &rendered_length, mask_input);
             print_newline();
             return;
         }
@@ -1398,7 +1463,7 @@ static void shell_read_buffer(char* input, size_t input_size, int mask_input, in
 
             cursor_index--;
             length--;
-            shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+            shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             continue;
         }
 
@@ -1412,14 +1477,14 @@ static void shell_read_buffer(char* input, size_t input_size, int mask_input, in
             }
 
             length--;
-            shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+            shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             continue;
         }
 
         if (key == KEY_LEFT) {
             if (cursor_index > 0) {
                 cursor_index--;
-                shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+                shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             }
             continue;
         }
@@ -1427,20 +1492,20 @@ static void shell_read_buffer(char* input, size_t input_size, int mask_input, in
         if (key == KEY_RIGHT) {
             if (cursor_index < length) {
                 cursor_index++;
-                shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+                shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             }
             continue;
         }
 
         if (key == KEY_HOME) {
             cursor_index = 0;
-            shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+            shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             continue;
         }
 
         if (key == KEY_END) {
             cursor_index = length;
-            shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+            shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             continue;
         }
 
@@ -1459,7 +1524,7 @@ static void shell_read_buffer(char* input, size_t input_size, int mask_input, in
             copy_string(input, input_size, shell_history[history_index]);
             length = str_length(input);
             cursor_index = length;
-            shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+            shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             continue;
         }
 
@@ -1478,7 +1543,7 @@ static void shell_read_buffer(char* input, size_t input_size, int mask_input, in
 
             length = str_length(input);
             cursor_index = length;
-            shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+            shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
             continue;
         }
 
@@ -1495,7 +1560,7 @@ static void shell_read_buffer(char* input, size_t input_size, int mask_input, in
         length++;
         input[length] = '\0';
         history_index = -1;
-        shell_render_buffer(start_col, start_row, input, length, cursor_index, &rendered_length, mask_input);
+        shell_render_buffer(start_col, start_abs_row, input, length, cursor_index, &rendered_length, mask_input);
     }
 }
 
@@ -1505,6 +1570,469 @@ static void shell_read_line(char* input, size_t input_size) {
 
 static void shell_read_password(char* input, size_t input_size) {
     shell_read_buffer(input, input_size, 1, 0);
+}
+
+static void print_string_at(size_t target_col, size_t target_row, char* text) {
+    if (!text) {
+        return;
+    }
+
+    for (size_t index = 0; text[index] != '\0'; index++) {
+        if (target_col + index >= print_get_num_cols()) {
+            return;
+        }
+
+        print_put_at(target_col + index, target_row, text[index]);
+    }
+}
+
+static void fill_row(size_t target_row, char character) {
+    for (size_t target_col = 0; target_col < print_get_num_cols(); target_col++) {
+        print_put_at(target_col, target_row, character);
+    }
+}
+
+static void draw_box_line(size_t target_row, uint8_t foreground, uint8_t background) {
+    print_set_color(foreground, background);
+    fill_row(target_row, ' ');
+}
+
+static int browser_page_from_location(char* location) {
+    if (!location || location[0] == '\0'
+        || strcmp(location, "home") == 0
+        || strcmp(location, "about:home") == 0) {
+        return BROWSER_PAGE_HOME;
+    }
+
+    if (strcmp(location, "network") == 0
+        || strcmp(location, "net") == 0
+        || strcmp(location, "about:network") == 0) {
+        return BROWSER_PAGE_NETWORK;
+    }
+
+    if (strcmp(location, "install") == 0
+        || strcmp(location, "about:install") == 0) {
+        return BROWSER_PAGE_INSTALL;
+    }
+
+    if (strcmp(location, "help") == 0
+        || strcmp(location, "about:help") == 0) {
+        return BROWSER_PAGE_HELP;
+    }
+
+    return BROWSER_PAGE_REMOTE;
+}
+
+static void browser_page_location(int page, char* location, size_t location_size) {
+    if (page == BROWSER_PAGE_NETWORK) {
+        copy_string(location, location_size, "about:network");
+        return;
+    }
+
+    if (page == BROWSER_PAGE_INSTALL) {
+        copy_string(location, location_size, "about:install");
+        return;
+    }
+
+    if (page == BROWSER_PAGE_HELP) {
+        copy_string(location, location_size, "about:help");
+        return;
+    }
+
+    copy_string(location, location_size, "about:home");
+}
+
+static void browser_sync_button_layout(struct BrowserButton buttons[], size_t* button_count) {
+    char* labels[BROWSER_BUTTON_MAX] = {"Back", "Forward", "Home", "Network", "Install", "Help", "Quit"};
+    int actions[BROWSER_BUTTON_MAX] = {
+        BROWSER_ACTION_BACK,
+        BROWSER_ACTION_FORWARD,
+        BROWSER_ACTION_HOME,
+        BROWSER_ACTION_NETWORK,
+        BROWSER_ACTION_INSTALL,
+        BROWSER_ACTION_HELP,
+        BROWSER_ACTION_QUIT
+    };
+    size_t cursor_x = 2;
+
+    for (size_t index = 0; index < BROWSER_BUTTON_MAX; index++) {
+        buttons[index].label = labels[index];
+        buttons[index].action = actions[index];
+        buttons[index].x = cursor_x;
+        buttons[index].y = 2;
+        buttons[index].width = str_length(labels[index]) + 2;
+        cursor_x += buttons[index].width + 2;
+    }
+
+    *button_count = BROWSER_BUTTON_MAX;
+}
+
+static int browser_button_at(struct BrowserButton buttons[], size_t button_count, size_t x, size_t y) {
+    for (size_t index = 0; index < button_count; index++) {
+        if (y != buttons[index].y) {
+            continue;
+        }
+
+        if (x >= buttons[index].x && x < buttons[index].x + buttons[index].width) {
+            return (int) index;
+        }
+    }
+
+    return -1;
+}
+
+static void browser_load_history_entry(struct BrowserState* state, int index) {
+    if (!state || index < 0 || index >= state->history_count) {
+        return;
+    }
+
+    state->history_index = index;
+    state->current_page = state->history_pages[index];
+    copy_string(state->location, sizeof(state->location), state->history_locations[index]);
+    copy_string(state->status, sizeof(state->status), "Loaded saved page");
+}
+
+static void browser_open_page(struct BrowserState* state, int page, char* location, int push_history) {
+    char normalized[BROWSER_LOCATION_SIZE];
+
+    if (!state) {
+        return;
+    }
+
+    if (page == BROWSER_PAGE_REMOTE && location && location[0] != '\0') {
+        copy_string(normalized, sizeof(normalized), location);
+    } else {
+        browser_page_location(page, normalized, sizeof(normalized));
+    }
+
+    state->current_page = page;
+    copy_string(state->location, sizeof(state->location), normalized);
+
+    if (!push_history) {
+        return;
+    }
+
+    if (state->history_index + 1 < state->history_count) {
+        state->history_count = state->history_index + 1;
+    }
+
+    if (state->history_count == BROWSER_HISTORY_SIZE) {
+        for (int index = 1; index < BROWSER_HISTORY_SIZE; index++) {
+            state->history_pages[index - 1] = state->history_pages[index];
+            copy_string(state->history_locations[index - 1],
+                        sizeof(state->history_locations[index - 1]),
+                        state->history_locations[index]);
+        }
+
+        state->history_count--;
+    }
+
+    state->history_pages[state->history_count] = page;
+    copy_string(state->history_locations[state->history_count],
+                sizeof(state->history_locations[state->history_count]),
+                normalized);
+    state->history_count++;
+    state->history_index = state->history_count - 1;
+}
+
+static void browser_activate_action(struct BrowserState* state, int action) {
+    if (!state) {
+        return;
+    }
+
+    if (action == BROWSER_ACTION_BACK) {
+        if (state->history_index > 0) {
+            browser_load_history_entry(state, state->history_index - 1);
+        } else {
+            copy_string(state->status, sizeof(state->status), "Already at the oldest page");
+        }
+        return;
+    }
+
+    if (action == BROWSER_ACTION_FORWARD) {
+        if (state->history_index + 1 < state->history_count) {
+            browser_load_history_entry(state, state->history_index + 1);
+        } else {
+            copy_string(state->status, sizeof(state->status), "Already at the newest page");
+        }
+        return;
+    }
+
+    if (action == BROWSER_ACTION_HOME) {
+        browser_open_page(state, BROWSER_PAGE_HOME, 0, 1);
+        copy_string(state->status, sizeof(state->status), "Opened home");
+        return;
+    }
+
+    if (action == BROWSER_ACTION_NETWORK) {
+        browser_open_page(state, BROWSER_PAGE_NETWORK, 0, 1);
+        copy_string(state->status, sizeof(state->status), "Opened network");
+        return;
+    }
+
+    if (action == BROWSER_ACTION_INSTALL) {
+        browser_open_page(state, BROWSER_PAGE_INSTALL, 0, 1);
+        copy_string(state->status, sizeof(state->status), "Opened install");
+        return;
+    }
+
+    if (action == BROWSER_ACTION_HELP) {
+        browser_open_page(state, BROWSER_PAGE_HELP, 0, 1);
+        copy_string(state->status, sizeof(state->status), "Opened help");
+        return;
+    }
+
+    state->running = 0;
+}
+
+static void browser_build_lines(struct BrowserState* state,
+                                char lines[][BROWSER_BODY_LINE_SIZE],
+                                size_t* line_count) {
+    size_t index = 0;
+
+    for (size_t row_index = 0; row_index < BROWSER_BODY_LINE_COUNT; row_index++) {
+        lines[row_index][0] = '\0';
+    }
+
+    if (state->current_page == BROWSER_PAGE_NETWORK) {
+        struct NetworkStatus network_status = network_get_status();
+
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Live network status");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Interface: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_status.enabled ? "up" : "down");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Packet driver: ");
+        append_string(lines[index++],
+                      BROWSER_BODY_LINE_SIZE,
+                      network_status.packet_driver_name[0] ? network_status.packet_driver_name : "none");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Driver state: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_driver_state());
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "IPv4 mode: ");
+        append_string(lines[index++],
+                      BROWSER_BODY_LINE_SIZE,
+                      network_status.mode == NETWORK_MODE_DHCP ? "DHCP" : (network_status.mode == NETWORK_MODE_STATIC ? "Static" : "Down"));
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "IP: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_status.ip[0] ? network_status.ip : "(unset)");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Netmask: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_status.netmask[0] ? network_status.netmask : "(unset)");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Gateway: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_status.gateway[0] ? network_status.gateway : "(unset)");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "WiFi: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_wifi_state());
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Packets: sent ");
+        append_u64_string(lines[index], BROWSER_BODY_LINE_SIZE, (uint64_t) network_status.packets_sent);
+        append_string(lines[index], BROWSER_BODY_LINE_SIZE, " received ");
+        append_u64_string(lines[index++], BROWSER_BODY_LINE_SIZE, (uint64_t) network_status.packets_received);
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "CastleBrowse is local-only right now.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Remote HTTP pages still need DNS, TCP, and HTTP support.");
+        *line_count = index;
+        return;
+    }
+
+    if (state->current_page == BROWSER_PAGE_INSTALL) {
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Install overview");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Installed: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, os_installed ? "yes" : "no");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Default shell: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, default_shell_style == SHELL_STYLE_BASH ? "CastleBash" : "Classic shell");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Install target: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, install_target);
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Install user: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, install_username);
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Run install to save the current userland image to a target.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Use disk to inspect modeled install devices and partitions.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Use drivers to inspect storage, USB, Ethernet, and WiFi picks.");
+        *line_count = index;
+        return;
+    }
+
+    if (state->current_page == BROWSER_PAGE_HELP) {
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Browser controls");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Move the trackpad or mouse to move the browser cursor.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Left click a button to activate it.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Tab or Left/Right changes the focused button.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Enter opens the focused button.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Esc or q leaves the browser.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Shift+Up and Shift+Down scroll terminal history outside the browser.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Mouse bytes are ignored by the shell so trackpad movement stops typing junk.");
+        *line_count = index;
+        return;
+    }
+
+    if (state->current_page == BROWSER_PAGE_REMOTE) {
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Remote page fetch is not ready yet.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Requested: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, state->location);
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "This browser currently hosts built-in about: pages only.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Try about:home, about:network, about:install, or about:help.");
+        *line_count = index;
+        return;
+    }
+
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "CastleBrowse");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "A lightweight text browser for CastleOS.");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Use the buttons above to move between built-in pages.");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Built-in locations");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- about:home");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- about:network");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- about:install");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- about:help");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Trackpad movement now belongs here instead of spilling into shell input.");
+    *line_count = index;
+}
+
+static void browser_render(struct BrowserState* state, struct MouseState* mouse_state) {
+    struct BrowserButton buttons[BROWSER_BUTTON_MAX];
+    char lines[BROWSER_BODY_LINE_COUNT][BROWSER_BODY_LINE_SIZE];
+    size_t button_count = 0;
+    size_t line_count = 0;
+    int hovered;
+
+    browser_sync_button_layout(buttons, &button_count);
+    hovered = browser_button_at(buttons, button_count, (size_t) mouse_state->x, (size_t) mouse_state->y);
+
+    for (size_t target_row = 0; target_row < print_get_num_rows(); target_row++) {
+        draw_box_line(target_row,
+                      target_row < 4 ? PRINT_COLOR_WHITE : PRINT_COLOR_LIGHT_GRAY,
+                      target_row < 4 ? PRINT_COLOR_BLUE : PRINT_COLOR_BLACK);
+    }
+
+    print_set_color(PRINT_COLOR_YELLOW, PRINT_COLOR_BLUE);
+    print_string_at(2, 0, "CastleBrowse");
+    print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLUE);
+    print_string_at(17, 0, "text browser");
+
+    for (size_t index = 0; index < button_count; index++) {
+        uint8_t foreground = PRINT_COLOR_WHITE;
+        uint8_t background = PRINT_COLOR_BLUE;
+
+        if ((int) index == state->focus_index || (int) index == hovered) {
+            foreground = PRINT_COLOR_BLACK;
+            background = PRINT_COLOR_YELLOW;
+        }
+
+        print_set_color(foreground, background);
+        print_put_at(buttons[index].x, buttons[index].y, '[');
+        print_string_at(buttons[index].x + 1, buttons[index].y, buttons[index].label);
+        print_put_at(buttons[index].x + buttons[index].width - 1, buttons[index].y, ']');
+    }
+
+    print_set_color(PRINT_COLOR_LIGHT_CYAN, PRINT_COLOR_BLUE);
+    print_string_at(2, 3, "Location: ");
+    print_string_at(12, 3, state->location);
+
+    browser_build_lines(state, lines, &line_count);
+    print_set_color(PRINT_COLOR_LIGHT_GRAY, PRINT_COLOR_BLACK);
+
+    for (size_t index = 0; index < line_count && index < BROWSER_BODY_LINE_COUNT; index++) {
+        print_string_at(2, 5 + index, lines[index]);
+    }
+
+    print_set_color(PRINT_COLOR_WHITE, PRINT_COLOR_BLUE);
+    print_string_at(2, 24, state->status);
+
+    if (mouse_state->visible) {
+        print_set_color(PRINT_COLOR_BLACK, PRINT_COLOR_LIGHT_GREEN);
+        print_put_at((size_t) mouse_state->x, (size_t) mouse_state->y, 'X');
+    }
+
+    print_refresh();
+}
+
+static void browser_run(char* location) {
+    struct BrowserState state;
+    struct BrowserButton buttons[BROWSER_BUTTON_MAX];
+    struct MouseState mouse_state;
+    size_t button_count = 0;
+    uint8_t last_buttons = 0;
+
+    state.running = 1;
+    state.current_page = BROWSER_PAGE_HOME;
+    state.focus_index = 2;
+    state.history_count = 0;
+    state.history_index = -1;
+    copy_string(state.status, sizeof(state.status), "Esc quits, Tab cycles, Enter opens, click buttons");
+
+    browser_sync_button_layout(buttons, &button_count);
+    browser_open_page(&state, browser_page_from_location(location), location, 1);
+
+    print_clear();
+    mouse_set_position((int) (print_get_num_cols() / 2), (int) (print_get_num_rows() / 2));
+    mouse_enable_cursor();
+    print_set_cursor_visible(0);
+
+    while (state.running) {
+        int key;
+
+        while (mouse_poll()) {
+        }
+
+        mouse_get_state(&mouse_state);
+        browser_render(&state, &mouse_state);
+
+        key = keyboard_pollkey();
+
+        if (mouse_state.buttons != last_buttons) {
+            int clicked_index = browser_button_at(buttons,
+                                                  button_count,
+                                                  (size_t) mouse_state.x,
+                                                  (size_t) mouse_state.y);
+
+            if (clicked_index >= 0) {
+                state.focus_index = clicked_index;
+            }
+
+            if ((mouse_state.buttons & MOUSE_BUTTON_LEFT)
+                && !(last_buttons & MOUSE_BUTTON_LEFT)
+                && clicked_index >= 0) {
+                browser_activate_action(&state, buttons[clicked_index].action);
+            }
+
+            last_buttons = mouse_state.buttons;
+        }
+
+        if (key == KEY_NONE) {
+            continue;
+        }
+
+        if (key == KEY_ESCAPE || key == 'q' || key == 'Q') {
+            break;
+        }
+
+        if (key == KEY_TAB || key == KEY_RIGHT) {
+            state.focus_index = (state.focus_index + 1) % (int) button_count;
+            continue;
+        }
+
+        if (key == KEY_LEFT) {
+            state.focus_index = state.focus_index == 0 ? (int) button_count - 1 : state.focus_index - 1;
+            continue;
+        }
+
+        if (key == KEY_ENTER) {
+            browser_activate_action(&state, buttons[state.focus_index].action);
+            continue;
+        }
+
+        if (key == KEY_HOME) {
+            browser_open_page(&state, BROWSER_PAGE_HOME, 0, 1);
+            copy_string(state.status, sizeof(state.status), "Opened home");
+        }
+    }
+
+    mouse_disable_cursor();
+    print_set_cursor_visible(1);
+    print_clear();
 }
 
 static char install_read_choice(char* prompt, char default_choice) {
@@ -4237,6 +4765,10 @@ static void cmd_pci(char* args) {
         print_pci_device(status.first_storage);
         print_newline();
     }
+}
+
+static void cmd_browser(char* args) {
+    browser_run(args ? skip_spaces(args) : 0);
 }
 
 static void cmd_shutdown(char* args) {

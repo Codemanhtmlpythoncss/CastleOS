@@ -1,0 +1,1 @@
+also after the browser is closed the background becomes green and text becomes white also add configuration for colors

@@ -1,5 +1,6 @@
 #include "print.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "shell.h"
 #include "timer.h"
 
@@ -13,6 +14,7 @@ void kernel_main(uint32_t multiboot_info_addr) {
 	print_str("Shell Loading...");
 	timer_init();
 	keyboard_init();
+	mouse_init();
 	shell_init(multiboot_info_addr);
 	shell_run();
 }

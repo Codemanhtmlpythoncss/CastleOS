@@ -14,8 +14,11 @@ enum {
     KEY_HOME,
     KEY_END,
     KEY_DELETE,
+    KEY_SHIFT_UP,
+    KEY_SHIFT_DOWN,
 };
 
+int keyboard_pollkey();
 int keyboard_getkey();
 void keyboard_init();
 
