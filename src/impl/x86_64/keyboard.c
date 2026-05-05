@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "keyboard.h"
+#include "mouse.h"
 #include "timer.h"
 
 static inline uint8_t inb(uint16_t port) {
@@ -138,11 +139,11 @@ static int translate_printable(uint8_t code) {
 
 static int translate_extended(uint8_t code) {
     if (code == 0x48) {
-        return KEY_UP;
+        return shift_active() ? KEY_SHIFT_UP : KEY_UP;
     }
 
     if (code == 0x50) {
-        return KEY_DOWN;
+        return shift_active() ? KEY_SHIFT_DOWN : KEY_DOWN;
     }
 
     if (code == 0x4B) {
@@ -176,17 +177,25 @@ static int translate_extended(uint8_t code) {
     return KEY_NONE;
 }
 
-int keyboard_getkey() {
+int keyboard_pollkey() {
     static uint8_t last_code = 0;
     static int last_was_press = 0;
 
     while (1) {
+        uint8_t status;
         uint8_t scancode;
         uint8_t code;
         int released;
         int translated;
 
-        while ((inb(0x64) & 0x01) == 0) {
+        status = inb(0x64);
+        if ((status & 0x01) == 0) {
+            return KEY_NONE;
+        }
+
+        if (status & 0x20) {
+            mouse_handle_interrupt();
+            continue;
         }
 
         scancode = inb(0x60);
@@ -299,4 +308,13 @@ int keyboard_getkey() {
             return translated;
         }
     }
+}
+
+int keyboard_getkey() {
+    int key;
+
+    while ((key = keyboard_pollkey()) == KEY_NONE) {
+    }
+
+    return key;
 }

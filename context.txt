@@ -1,5 +1,5 @@
 CastleOS session context
-Updated: 2026-04-28
+Updated: 2026-05-05
 
 User goals from this chat
 - Fix the x86_64 build/link failure around shell commands.
@@ -33,13 +33,23 @@ User goals from this chat
   - also add ssh
 - Latest reminder from the user:
   - keep updating this context file
-- Clarified edit boundary from the user:
-  - the current working directory can be edited
-  - do not edit a nested directory named `castleos/` inside it
+- Clarified path boundary from the user:
+  - the real repo is /Users/barnabyraynes/Documents/GitHub/CastleOS
+  - do not work in the nested /Users/barnabyraynes/Documents/GitHub/CastleOS/CastleOS copy
 - User asked to keep this file updated every prompt so context survives better if the chat limit is hit.
+- Latest direct requests in the real repo:
+  - add Shift+Up and Shift+Down terminal scrolling
+  - add a lightweight text-only browser with buttons
+  - only enable the cursor in the browser
+  - stop mouse or trackpad movement from typing junk into the shell
+  - fix end-of-row typing so it wraps properly again
+  - keep the current WiFi implementation alone because it is working on this repo
+- Latest follow-up:
+  - mouse cursor is too sensitive
+  - user asked how to open a website in the new browser
 
 Important environment context
-- Working directory: /Users/barnabyraynes/Documents/github/CastleOS
+- Working directory: /Users/barnabyraynes/Documents/GitHub/CastleOS
 - The local machine can compile and link the kernel, but local ISO packaging fails because grub-mkrescue is not installed outside Docker.
 - README says the intended build flow is:
   1) docker run --rm -it -v $(pwd):/root/env myos-buildenv
@@ -150,9 +160,47 @@ Known current architectural limits
 
 Current priority at the moment of this update
 1) Keep this file updated.
-2) Reassess Wi-Fi/storage/real-install work honestly based on what is actually in the repo today.
-3) For Wi-Fi, choose one concrete target instead of pretending to support "wireless" generically.
+2) Keep WiFi/network behavior in this repo untouched while fixing shell/input issues around it.
+3) Finish input, scrollback, and browser work in the top-level repo.
 4) Keep build verification passing after each change.
+
+Latest top-level repo changes completed
+- src/intf/keyboard.h
+  - Added KEY_SHIFT_UP and KEY_SHIFT_DOWN.
+  - Added keyboard_pollkey() for non-blocking browser input.
+- src/impl/x86_64/keyboard.c
+  - Now filters auxiliary PS/2 bytes so mouse movement is not treated as shell key input.
+  - Feeds auxiliary bytes into the mouse state path instead of letting them leak into shell typing.
+  - Adds Shift+Up and Shift+Down key reporting.
+- src/intf/mouse.h and src/impl/x86_64/mouse.c
+  - Added mouse_poll() so the shell/browser can poll live mouse movement without needing interrupt wiring.
+  - Tuned browser mouse sensitivity with accumulated raw deltas, separate X/Y divisors, and a maximum movement step per packet.
+- src/intf/print.h and src/impl/x86_64/print.c
+  - Reworked terminal output around a scrollback-backed text buffer.
+  - Added viewport scrolling, absolute cursor rows, cursor visibility control, and refresh helpers.
+  - This fixes shell editing at the end of rows and enables terminal scrollback.
+- src/impl/x86_64/shell.c
+  - Shell line rendering now uses absolute rows instead of clipping to the visible 80x25 window.
+  - Shell input now supports Shift+Up and Shift+Down to scroll terminal history.
+  - Added a lightweight built-in text browser command: browser
+  - Browser has:
+    - button bar
+    - mouse cursor only inside browser mode
+    - click support
+    - keyboard fallback with Tab, arrows, Enter, Esc
+    - built-in about pages for home, network, install, and help
+  - WiFi/network code was intentionally left unchanged in network.c as requested.
+
+Latest verification in the top-level repo
+- make build-x86_64 in /Users/barnabyraynes/Documents/GitHub/CastleOS now compiles and links cleanly.
+- The only remaining host failure is still ISO packaging:
+  - /bin/sh: grub-mkrescue: command not found
+- Docker build in the top-level repo was rerun successfully with castleos-buildenv and produced:
+  - dist/x86_64/CastleOS.iso
+- A light QEMU boot pass was also run against the new ISO.
+  - Booted with rtl8139 and a monitor socket.
+  - A boot screenshot file was produced at /tmp/castleos-final-boot.png.
+  - This confirms the image boots far enough for monitor capture, but browser visuals and new scroll behavior still want a fuller interactive guest test.
 
 Wireless assessment from the latest inspection
 - drivers.c detects wireless-class PCI devices and stores first_wireless metadata, but does not initialize any wireless hardware.

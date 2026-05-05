@@ -1,5 +1,5 @@
 CastleOS checklist
-Updated: 2026-04-28
+Updated: 2026-05-05
 
 Verified working
 - Docker build flow
@@ -43,6 +43,8 @@ Known not working
   - Detection and driver selection exist, but there is still no working wireless packet/data path
 - Real persistent storage install
   - Installer writes modeled install state and manifests, but the repo still lacks real ATA/AHCI/NVMe block drivers
+- Remote web fetch in browser
+  - Browser mode exists, but remote HTTP/HTTPS pages are not implemented
 
 Needs user test
 - [ ] net config
@@ -120,4 +122,39 @@ Needs user test
   - Confirm:
     - profile is saved
     - command reports that TCP/IP and SSH transport are not implemented yet
+  - Result:
+
+- [ ] browser
+  - Boot the ISO
+  - Run: browser
+  - Confirm:
+    - button bar renders
+    - mouse cursor is visible only in browser mode
+    - Home, Network, Install, Help, and Quit buttons work
+    - keyboard navigation works with Tab, Left/Right, Enter, and Esc
+  - Result:
+
+- [ ] mouse isolation in shell
+  - Boot the ISO
+  - Stay at the shell prompt
+  - Move on the trackpad or mouse without opening browser
+  - Confirm:
+    - no random characters appear in the shell
+  - Result:
+
+- [ ] shell scrollback
+  - Boot the ISO
+  - Produce enough output to scroll
+  - Use Shift+Up and Shift+Down
+  - Confirm:
+    - terminal scrolls through recent output
+    - normal typing returns to the live prompt after scrolling
+  - Result:
+
+- [ ] shell line wrapping
+  - Boot the ISO
+  - At the prompt, type past the end of the row by hand
+  - Confirm:
+    - input wraps onto the next row
+    - editing still works near the bottom of the screen
   - Result:
