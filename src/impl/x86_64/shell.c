@@ -25,11 +25,12 @@
 #define INSTALL_LOCATION_SIZE 96
 #define INSTALL_MANIFEST_SIZE 16384
 #define BROWSER_HISTORY_SIZE 16
-#define BROWSER_LOCATION_SIZE 64
-#define BROWSER_STATUS_SIZE 80
-#define BROWSER_BUTTON_MAX 7
+#define BROWSER_LOCATION_SIZE 160
+#define BROWSER_STATUS_SIZE 96
+#define BROWSER_BUTTON_MAX 8
 #define BROWSER_BODY_LINE_COUNT 18
 #define BROWSER_BODY_LINE_SIZE 77
+#define BROWSER_REMOTE_TEXT_SIZE 4096
 #define MULTIBOOT_TAG_END 0
 #define MULTIBOOT_TAG_BASIC_MEMINFO 4
 #define MULTIBOOT_TAG_MMAP 6
@@ -56,7 +57,8 @@
 #define BROWSER_ACTION_NETWORK 3
 #define BROWSER_ACTION_INSTALL 4
 #define BROWSER_ACTION_HELP 5
-#define BROWSER_ACTION_QUIT 6
+#define BROWSER_ACTION_OPEN 6
+#define BROWSER_ACTION_QUIT 7
 
 struct Command {
     char* name;
@@ -141,6 +143,9 @@ struct BrowserState {
     char location[BROWSER_LOCATION_SIZE];
     char history_locations[BROWSER_HISTORY_SIZE][BROWSER_LOCATION_SIZE];
     char status[BROWSER_STATUS_SIZE];
+    char remote_text[BROWSER_REMOTE_TEXT_SIZE];
+    size_t remote_scroll;
+    int request_location_prompt;
 };
 
 int strcmp(char* a, char* b);
@@ -166,6 +171,9 @@ static char ssh_last_host[SSH_HOST_SIZE];
 static char ssh_remote_user[SHELL_USERNAME_SIZE] = "barnaby";
 static uint32_t ssh_host_key_seed = 0x53485348;
 static char ssh_host_key_fingerprint[SSH_FINGERPRINT_SIZE];
+static uint8_t terminal_foreground = PRINT_COLOR_GREEN;
+static uint8_t terminal_background = PRINT_COLOR_BLACK;
+static char browser_http_body[BROWSER_REMOTE_TEXT_SIZE];
 
 static inline void outw(uint16_t port, uint16_t value);
 static void cpuid(unsigned int code, unsigned int* a, unsigned int* b, unsigned int* c, unsigned int* d);
@@ -224,6 +232,7 @@ static void print_all_subsystem_driver_choices();
 static void persist_driver_preferences();
 static void persist_install_target_configuration();
 static void persist_ssh_configuration();
+static void persist_terminal_color_configuration();
 static void build_ssh_host_key_fingerprint(char* buffer, size_t buffer_size);
 static void refresh_install_targets();
 static struct InstallTarget* find_install_target(const char* path);
@@ -237,12 +246,22 @@ static void print_string_at(size_t target_col, size_t target_row, char* text);
 static void fill_row(size_t target_row, char character);
 static void draw_box_line(size_t target_row, uint8_t foreground, uint8_t background);
 static int browser_page_from_location(char* location);
+static void shell_apply_terminal_color();
+static char* terminal_color_name(uint8_t color_value);
+static int parse_terminal_color(char* text, uint8_t* color_value);
+static void print_terminal_color_palette();
+static void print_terminal_color_status();
 static void browser_page_location(int page, char* location, size_t location_size);
 static void browser_sync_button_layout(struct BrowserButton buttons[], size_t* button_count);
 static int browser_button_at(struct BrowserButton buttons[], size_t button_count, size_t x, size_t y);
 static void browser_load_history_entry(struct BrowserState* state, int index);
 static void browser_open_page(struct BrowserState* state, int page, char* location, int push_history);
 static void browser_activate_action(struct BrowserState* state, int action);
+static void browser_prompt_for_location(struct BrowserState* state);
+static void browser_strip_html_to_text(char* source, char* output, size_t output_size);
+static void browser_build_remote_lines(struct BrowserState* state,
+                                       char lines[][BROWSER_BODY_LINE_SIZE],
+                                       size_t* line_count);
 static void browser_build_lines(struct BrowserState* state,
                                 char lines[][BROWSER_BODY_LINE_SIZE],
                                 size_t* line_count);
@@ -254,6 +273,7 @@ static void cmd_wifi_config();
 static void cmd_ssh_config();
 static void cmd_disk_config();
 static void cmd_drivers_config();
+static void cmd_colors_config();
 static int write_install_image(struct InstallTarget* target,
                                char network_choice,
                                const char* ip,
@@ -292,6 +312,7 @@ static void cmd_disk(char* args);
 static void cmd_drivers(char* args);
 static void cmd_pci(char* args);
 static void cmd_browser(char* args);
+static void cmd_colors(char* args);
 static void cmd_shutdown(char* args);
 
 static struct Command commands[] = {
@@ -325,6 +346,7 @@ static struct Command commands[] = {
     {"drivers", cmd_drivers, "shows loaded and missing hardware drivers", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"pci", cmd_pci, "shows detected PCI hardware summary", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"browser", cmd_browser, "opens the CastleBrowse text browser", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
+    {"colors", cmd_colors, "shows or configures terminal colors", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"shutdown", cmd_shutdown, "powers off the machine", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
 };
 
@@ -711,6 +733,7 @@ static void vfs_init() {
         vfs_create_file(etc_index, "install.conf", "target=/dev/ram0\n");
         vfs_create_file(etc_index, "wifi.conf", "ssid=\n");
         vfs_create_file(etc_index, "ssh.conf", "enabled=0\nport=22\nuser=barnaby\nlast_host=\nhostkey=\n");
+        vfs_create_file(etc_index, "colors.conf", "foreground=green\nbackground=black\n");
     }
 
     if (home_notes >= 0) {
@@ -1597,6 +1620,137 @@ static void draw_box_line(size_t target_row, uint8_t foreground, uint8_t backgro
     fill_row(target_row, ' ');
 }
 
+static void shell_apply_terminal_color() {
+    print_set_color(terminal_foreground, terminal_background);
+}
+
+static char* terminal_color_name(uint8_t color_value) {
+    if (color_value == PRINT_COLOR_BLACK) {
+        return "black";
+    }
+
+    if (color_value == PRINT_COLOR_BLUE) {
+        return "blue";
+    }
+
+    if (color_value == PRINT_COLOR_GREEN) {
+        return "green";
+    }
+
+    if (color_value == PRINT_COLOR_CYAN) {
+        return "cyan";
+    }
+
+    if (color_value == PRINT_COLOR_RED) {
+        return "red";
+    }
+
+    if (color_value == PRINT_COLOR_MAGENTA) {
+        return "magenta";
+    }
+
+    if (color_value == PRINT_COLOR_BROWN) {
+        return "brown";
+    }
+
+    if (color_value == PRINT_COLOR_LIGHT_GRAY) {
+        return "light_gray";
+    }
+
+    if (color_value == PRINT_COLOR_DARK_GRAY) {
+        return "dark_gray";
+    }
+
+    if (color_value == PRINT_COLOR_LIGHT_BLUE) {
+        return "light_blue";
+    }
+
+    if (color_value == PRINT_COLOR_LIGHT_GREEN) {
+        return "light_green";
+    }
+
+    if (color_value == PRINT_COLOR_LIGHT_CYAN) {
+        return "light_cyan";
+    }
+
+    if (color_value == PRINT_COLOR_LIGHT_RED) {
+        return "light_red";
+    }
+
+    if (color_value == PRINT_COLOR_PINK) {
+        return "pink";
+    }
+
+    if (color_value == PRINT_COLOR_YELLOW) {
+        return "yellow";
+    }
+
+    return "white";
+}
+
+static int parse_terminal_color(char* text, uint8_t* color_value) {
+    uint16_t number;
+
+    text = skip_spaces(text);
+    if (!text || !color_value) {
+        return 0;
+    }
+
+    if (parse_u16_decimal(text, &number) && number <= PRINT_COLOR_WHITE) {
+        *color_value = (uint8_t) number;
+        return 1;
+    }
+
+    for (uint8_t index = PRINT_COLOR_BLACK; index <= PRINT_COLOR_WHITE; index++) {
+        if (strcmp(text, terminal_color_name(index)) == 0) {
+            *color_value = index;
+            return 1;
+        }
+    }
+
+    if (strcmp(text, "gray") == 0 || strcmp(text, "grey") == 0) {
+        *color_value = PRINT_COLOR_LIGHT_GRAY;
+        return 1;
+    }
+
+    if (strcmp(text, "light_grey") == 0) {
+        *color_value = PRINT_COLOR_LIGHT_GRAY;
+        return 1;
+    }
+
+    if (strcmp(text, "dark_grey") == 0) {
+        *color_value = PRINT_COLOR_DARK_GRAY;
+        return 1;
+    }
+
+    return 0;
+}
+
+static void print_terminal_color_palette() {
+    for (uint8_t index = PRINT_COLOR_BLACK; index <= PRINT_COLOR_WHITE; index++) {
+        print_u64((uint64_t) index);
+        print_str(" - ");
+        print_str(terminal_color_name(index));
+        print_newline();
+    }
+}
+
+static void print_terminal_color_status() {
+    print_str("Terminal colors");
+    print_newline();
+    print_str("Foreground: ");
+    print_str(terminal_color_name(terminal_foreground));
+    print_str(" (");
+    print_u64((uint64_t) terminal_foreground);
+    print_str(")");
+    print_newline();
+    print_str("Background: ");
+    print_str(terminal_color_name(terminal_background));
+    print_str(" (");
+    print_u64((uint64_t) terminal_background);
+    print_str(")");
+}
+
 static int browser_page_from_location(char* location) {
     if (!location || location[0] == '\0'
         || strcmp(location, "home") == 0
@@ -1643,7 +1797,7 @@ static void browser_page_location(int page, char* location, size_t location_size
 }
 
 static void browser_sync_button_layout(struct BrowserButton buttons[], size_t* button_count) {
-    char* labels[BROWSER_BUTTON_MAX] = {"Back", "Forward", "Home", "Network", "Install", "Help", "Quit"};
+    char* labels[BROWSER_BUTTON_MAX] = {"Back", "Forward", "Home", "Network", "Install", "Help", "Open", "Quit"};
     int actions[BROWSER_BUTTON_MAX] = {
         BROWSER_ACTION_BACK,
         BROWSER_ACTION_FORWARD,
@@ -1651,6 +1805,7 @@ static void browser_sync_button_layout(struct BrowserButton buttons[], size_t* b
         BROWSER_ACTION_NETWORK,
         BROWSER_ACTION_INSTALL,
         BROWSER_ACTION_HELP,
+        BROWSER_ACTION_OPEN,
         BROWSER_ACTION_QUIT
     };
     size_t cursor_x = 2;
@@ -1689,6 +1844,24 @@ static void browser_load_history_entry(struct BrowserState* state, int index) {
     state->history_index = index;
     state->current_page = state->history_pages[index];
     copy_string(state->location, sizeof(state->location), state->history_locations[index]);
+    state->remote_scroll = 0;
+    if (state->current_page == BROWSER_PAGE_REMOTE) {
+        int result = network_http_get(state->location,
+                                      browser_http_body,
+                                      sizeof(browser_http_body),
+                                      state->status,
+                                      sizeof(state->status));
+
+        if (result == NETWORK_HTTP_OK || result == NETWORK_HTTP_RESPONSE_TOO_LARGE) {
+            browser_strip_html_to_text(browser_http_body, state->remote_text, sizeof(state->remote_text));
+        } else {
+            copy_string(state->remote_text, sizeof(state->remote_text), "Could not load ");
+            append_string(state->remote_text, sizeof(state->remote_text), state->location);
+            append_string(state->remote_text, sizeof(state->remote_text), "\n");
+            append_string(state->remote_text, sizeof(state->remote_text), state->status);
+        }
+        return;
+    }
     copy_string(state->status, sizeof(state->status), "Loaded saved page");
 }
 
@@ -1707,6 +1880,33 @@ static void browser_open_page(struct BrowserState* state, int page, char* locati
 
     state->current_page = page;
     copy_string(state->location, sizeof(state->location), normalized);
+    state->remote_scroll = 0;
+
+    if (page == BROWSER_PAGE_REMOTE) {
+        int result;
+
+        copy_string(state->status, sizeof(state->status), "Fetching page...");
+        state->remote_text[0] = '\0';
+        browser_http_body[0] = '\0';
+        result = network_http_get(state->location,
+                                  browser_http_body,
+                                  sizeof(browser_http_body),
+                                  state->status,
+                                  sizeof(state->status));
+
+        if (result == NETWORK_HTTP_OK || result == NETWORK_HTTP_RESPONSE_TOO_LARGE) {
+            browser_strip_html_to_text(browser_http_body, state->remote_text, sizeof(state->remote_text));
+
+            if (state->remote_text[0] == '\0') {
+                copy_string(state->remote_text, sizeof(state->remote_text), "(empty page)");
+            }
+        } else {
+            copy_string(state->remote_text, sizeof(state->remote_text), "Could not load ");
+            append_string(state->remote_text, sizeof(state->remote_text), state->location);
+            append_string(state->remote_text, sizeof(state->remote_text), "\n");
+            append_string(state->remote_text, sizeof(state->remote_text), state->status);
+        }
+    }
 
     if (!push_history) {
         return;
@@ -1782,7 +1982,199 @@ static void browser_activate_action(struct BrowserState* state, int action) {
         return;
     }
 
+    if (action == BROWSER_ACTION_OPEN) {
+        state->request_location_prompt = 1;
+        copy_string(state->status, sizeof(state->status), "Enter a URL");
+        return;
+    }
+
     state->running = 0;
+}
+
+static void browser_append_text_char(char* output, size_t output_size, char character) {
+    size_t length = str_length(output);
+
+    if (length + 1 >= output_size) {
+        return;
+    }
+
+    if (character == '\r') {
+        return;
+    }
+
+    if (character == '\n') {
+        if (length == 0 || output[length - 1] == '\n') {
+            return;
+        }
+
+        output[length] = '\n';
+        output[length + 1] = '\0';
+        return;
+    }
+
+    if (character == '\t') {
+        character = ' ';
+    }
+
+    if (character < 32 || character > 126) {
+        return;
+    }
+
+    if (character == ' ' && (length == 0 || output[length - 1] == ' ' || output[length - 1] == '\n')) {
+        return;
+    }
+
+    output[length] = character;
+    output[length + 1] = '\0';
+}
+
+static int browser_tag_starts_with(char* text, char* tag) {
+    size_t index = 0;
+
+    while (tag[index] != '\0') {
+        char left = text[index];
+        char right = tag[index];
+
+        if (left >= 'A' && left <= 'Z') {
+            left = (char) (left + 32);
+        }
+
+        if (right >= 'A' && right <= 'Z') {
+            right = (char) (right + 32);
+        }
+
+        if (left != right) {
+            return 0;
+        }
+
+        index++;
+    }
+
+    return 1;
+}
+
+static void browser_strip_html_to_text(char* source, char* output, size_t output_size) {
+    int in_tag = 0;
+
+    if (!output || output_size == 0) {
+        return;
+    }
+
+    output[0] = '\0';
+
+    if (!source) {
+        return;
+    }
+
+    for (size_t index = 0; source[index] != '\0'; index++) {
+        char character = source[index];
+
+        if (character == '<') {
+            char* tag = &source[index + 1];
+
+            if (browser_tag_starts_with(tag, "br")
+                || browser_tag_starts_with(tag, "p")
+                || browser_tag_starts_with(tag, "/p")
+                || browser_tag_starts_with(tag, "div")
+                || browser_tag_starts_with(tag, "/div")
+                || browser_tag_starts_with(tag, "li")
+                || browser_tag_starts_with(tag, "h1")
+                || browser_tag_starts_with(tag, "h2")
+                || browser_tag_starts_with(tag, "h3")
+                || browser_tag_starts_with(tag, "/h")) {
+                browser_append_text_char(output, output_size, '\n');
+            }
+
+            in_tag = 1;
+            continue;
+        }
+
+        if (in_tag) {
+            if (character == '>') {
+                in_tag = 0;
+            }
+            continue;
+        }
+
+        if (character == '&') {
+            if (browser_tag_starts_with(&source[index + 1], "amp;")) {
+                browser_append_text_char(output, output_size, '&');
+                index += 4;
+                continue;
+            }
+
+            if (browser_tag_starts_with(&source[index + 1], "lt;")) {
+                browser_append_text_char(output, output_size, '<');
+                index += 3;
+                continue;
+            }
+
+            if (browser_tag_starts_with(&source[index + 1], "gt;")) {
+                browser_append_text_char(output, output_size, '>');
+                index += 3;
+                continue;
+            }
+
+            if (browser_tag_starts_with(&source[index + 1], "quot;")) {
+                browser_append_text_char(output, output_size, '"');
+                index += 5;
+                continue;
+            }
+
+            if (browser_tag_starts_with(&source[index + 1], "nbsp;")) {
+                browser_append_text_char(output, output_size, ' ');
+                index += 5;
+                continue;
+            }
+        }
+
+        browser_append_text_char(output, output_size, character);
+    }
+}
+
+static void browser_build_remote_lines(struct BrowserState* state,
+                                       char lines[][BROWSER_BODY_LINE_SIZE],
+                                       size_t* line_count) {
+    size_t visible_index = 0;
+    size_t visual_line = 0;
+    size_t column = 0;
+    char current_line[BROWSER_BODY_LINE_SIZE];
+
+    current_line[0] = '\0';
+
+    for (size_t source_index = 0; ; source_index++) {
+        char character = state->remote_text[source_index];
+        int finish_line = character == '\n' || character == '\0' || column + 1 >= BROWSER_BODY_LINE_SIZE;
+
+        if (!finish_line) {
+            current_line[column++] = character;
+            current_line[column] = '\0';
+            continue;
+        }
+
+        if (visual_line >= state->remote_scroll && visible_index < BROWSER_BODY_LINE_COUNT) {
+            copy_string(lines[visible_index++], BROWSER_BODY_LINE_SIZE, current_line);
+        }
+
+        visual_line++;
+        column = 0;
+        current_line[0] = '\0';
+
+        if (character == '\0' || visible_index >= BROWSER_BODY_LINE_COUNT) {
+            break;
+        }
+
+        if (character != '\n') {
+            current_line[column++] = character;
+            current_line[column] = '\0';
+        }
+    }
+
+    if (visible_index == 0) {
+        copy_string(lines[visible_index++], BROWSER_BODY_LINE_SIZE, "(no visible text)");
+    }
+
+    *line_count = visible_index;
 }
 
 static void browser_build_lines(struct BrowserState* state,
@@ -1817,6 +2209,8 @@ static void browser_build_lines(struct BrowserState* state,
         append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_status.netmask[0] ? network_status.netmask : "(unset)");
         copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Gateway: ");
         append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_status.gateway[0] ? network_status.gateway : "(unset)");
+        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "DNS: ");
+        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_status.dns[0] ? network_status.dns : "(unset)");
         copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "WiFi: ");
         append_string(lines[index++], BROWSER_BODY_LINE_SIZE, network_wifi_state());
         copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Packets: sent ");
@@ -1824,8 +2218,8 @@ static void browser_build_lines(struct BrowserState* state,
         append_string(lines[index], BROWSER_BODY_LINE_SIZE, " received ");
         append_u64_string(lines[index++], BROWSER_BODY_LINE_SIZE, (uint64_t) network_status.packets_received);
         copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
-        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "CastleBrowse is local-only right now.");
-        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Remote HTTP pages still need DNS, TCP, and HTTP support.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "CastleBrowse uses DNS, TCP, and HTTP over this network link.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Open http://example.com or another plain HTTP URL.");
         *line_count = index;
         return;
     }
@@ -1856,6 +2250,8 @@ static void browser_build_lines(struct BrowserState* state,
         copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Left click a button to activate it.");
         copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Tab or Left/Right changes the focused button.");
         copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Enter opens the focused button.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Open or g asks for a URL.");
+        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Up/Down scrolls a loaded web page.");
         copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Esc or q leaves the browser.");
         copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
         copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Shift+Up and Shift+Down scroll terminal history outside the browser.");
@@ -1865,14 +2261,7 @@ static void browser_build_lines(struct BrowserState* state,
     }
 
     if (state->current_page == BROWSER_PAGE_REMOTE) {
-        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Remote page fetch is not ready yet.");
-        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
-        copy_string(lines[index], BROWSER_BODY_LINE_SIZE, "Requested: ");
-        append_string(lines[index++], BROWSER_BODY_LINE_SIZE, state->location);
-        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
-        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "This browser currently hosts built-in about: pages only.");
-        copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Try about:home, about:network, about:install, or about:help.");
-        *line_count = index;
+        browser_build_remote_lines(state, lines, line_count);
         return;
     }
 
@@ -1887,8 +2276,40 @@ static void browser_build_lines(struct BrowserState* state,
     copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- about:install");
     copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- about:help");
     copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Web browsing");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- browser http://example.com/");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "- use Open or press g to enter a URL");
+    copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, " ");
     copy_string(lines[index++], BROWSER_BODY_LINE_SIZE, "Trackpad movement now belongs here instead of spilling into shell input.");
     *line_count = index;
+}
+
+static void browser_prompt_for_location(struct BrowserState* state) {
+    char line[SHELL_INPUT_SIZE];
+    char* location;
+
+    if (!state) {
+        return;
+    }
+
+    mouse_disable_cursor();
+    print_set_cursor_visible(1);
+    shell_apply_terminal_color();
+    print_clear();
+    print_str("CastleBrowse URL: ");
+    shell_read_line(line, sizeof(line));
+
+    location = skip_spaces(line);
+    if (location) {
+        browser_open_page(state, browser_page_from_location(location), location, 1);
+    } else {
+        copy_string(state->status, sizeof(state->status), "Open cancelled");
+    }
+
+    print_clear();
+    mouse_enable_cursor();
+    print_set_cursor_visible(0);
+    state->request_location_prompt = 0;
 }
 
 static void browser_render(struct BrowserState* state, struct MouseState* mouse_state) {
@@ -1961,11 +2382,15 @@ static void browser_run(char* location) {
     state.focus_index = 2;
     state.history_count = 0;
     state.history_index = -1;
+    state.remote_scroll = 0;
+    state.request_location_prompt = 0;
+    state.remote_text[0] = '\0';
     copy_string(state.status, sizeof(state.status), "Esc quits, Tab cycles, Enter opens, click buttons");
 
     browser_sync_button_layout(buttons, &button_count);
     browser_open_page(&state, browser_page_from_location(location), location, 1);
 
+    shell_apply_terminal_color();
     print_clear();
     mouse_set_position((int) (print_get_num_cols() / 2), (int) (print_get_num_rows() / 2));
     mouse_enable_cursor();
@@ -2001,12 +2426,34 @@ static void browser_run(char* location) {
             last_buttons = mouse_state.buttons;
         }
 
+        if (state.request_location_prompt) {
+            browser_prompt_for_location(&state);
+            continue;
+        }
+
         if (key == KEY_NONE) {
             continue;
         }
 
         if (key == KEY_ESCAPE || key == 'q' || key == 'Q') {
             break;
+        }
+
+        if (key == 'g' || key == 'G' || key == 'o' || key == 'O') {
+            browser_prompt_for_location(&state);
+            continue;
+        }
+
+        if (state.current_page == BROWSER_PAGE_REMOTE && key == KEY_UP) {
+            if (state.remote_scroll > 0) {
+                state.remote_scroll--;
+            }
+            continue;
+        }
+
+        if (state.current_page == BROWSER_PAGE_REMOTE && key == KEY_DOWN) {
+            state.remote_scroll++;
+            continue;
         }
 
         if (key == KEY_TAB || key == KEY_RIGHT) {
@@ -2021,6 +2468,9 @@ static void browser_run(char* location) {
 
         if (key == KEY_ENTER) {
             browser_activate_action(&state, buttons[state.focus_index].action);
+            if (state.request_location_prompt) {
+                browser_prompt_for_location(&state);
+            }
             continue;
         }
 
@@ -2032,6 +2482,7 @@ static void browser_run(char* location) {
 
     mouse_disable_cursor();
     print_set_cursor_visible(1);
+    shell_apply_terminal_color();
     print_clear();
 }
 
@@ -2403,6 +2854,9 @@ static void print_network_status() {
         print_newline();
         print_str("Gateway: ");
         print_str(status.gateway);
+        print_newline();
+        print_str("DNS: ");
+        print_str(status.dns[0] ? status.dns : "(unset)");
     } else if (status.mode == NETWORK_MODE_DHCP) {
         print_newline();
         print_str("IP: ");
@@ -2413,6 +2867,9 @@ static void print_network_status() {
         print_newline();
         print_str("Gateway: ");
         print_str(status.gateway);
+        print_newline();
+        print_str("DNS: ");
+        print_str(status.dns[0] ? status.dns : "(unset)");
     }
 }
 
@@ -2670,6 +3127,33 @@ static void persist_ssh_configuration() {
         append_u64_string(vfs_nodes[ssh_file].content, sizeof(vfs_nodes[ssh_file].content), ssh_host_key_seed);
         append_string(vfs_nodes[ssh_file].content, sizeof(vfs_nodes[ssh_file].content), "\n");
         vfs_nodes[ssh_file].size = str_length(vfs_nodes[ssh_file].content);
+    }
+}
+
+static void persist_terminal_color_configuration() {
+    int etc_directory = vfs_find_child(0, "etc");
+    int colors_file;
+
+    if (etc_directory < 0) {
+        return;
+    }
+
+    colors_file = vfs_find_child(etc_directory, "colors.conf");
+    if (colors_file < 0) {
+        colors_file = vfs_create_file(etc_directory, "colors.conf", "");
+    }
+
+    if (colors_file >= 0) {
+        copy_string(vfs_nodes[colors_file].content, sizeof(vfs_nodes[colors_file].content), "foreground=");
+        append_string(vfs_nodes[colors_file].content,
+                      sizeof(vfs_nodes[colors_file].content),
+                      terminal_color_name(terminal_foreground));
+        append_string(vfs_nodes[colors_file].content, sizeof(vfs_nodes[colors_file].content), "\nbackground=");
+        append_string(vfs_nodes[colors_file].content,
+                      sizeof(vfs_nodes[colors_file].content),
+                      terminal_color_name(terminal_background));
+        append_string(vfs_nodes[colors_file].content, sizeof(vfs_nodes[colors_file].content), "\n");
+        vfs_nodes[colors_file].size = str_length(vfs_nodes[colors_file].content);
     }
 }
 
@@ -3197,6 +3681,82 @@ static void cmd_drivers_config() {
     print_driver_status();
 }
 
+static void cmd_colors_config() {
+    char choice = install_read_choice("Colors config 1) Status 2) List 3) Foreground 4) Background 5) Reset [1]: ", '1');
+    char line[SHELL_INPUT_SIZE];
+    uint8_t chosen_color;
+
+    if (choice == '2') {
+        print_terminal_color_palette();
+        return;
+    }
+
+    if (choice == '3') {
+        print_terminal_color_palette();
+        print_str("Foreground [");
+        print_str(terminal_color_name(terminal_foreground));
+        print_str("]: ");
+        shell_read_line(line, sizeof(line));
+
+        if (!skip_spaces(line)) {
+            print_terminal_color_status();
+            return;
+        }
+
+        if (!parse_terminal_color(line, &chosen_color)) {
+            print_str("colors: unknown foreground");
+            return;
+        }
+
+        terminal_foreground = chosen_color;
+        shell_apply_terminal_color();
+        persist_terminal_color_configuration();
+        print_str("Foreground updated");
+        print_newline();
+        print_terminal_color_status();
+        return;
+    }
+
+    if (choice == '4') {
+        print_terminal_color_palette();
+        print_str("Background [");
+        print_str(terminal_color_name(terminal_background));
+        print_str("]: ");
+        shell_read_line(line, sizeof(line));
+
+        if (!skip_spaces(line)) {
+            print_terminal_color_status();
+            return;
+        }
+
+        if (!parse_terminal_color(line, &chosen_color)) {
+            print_str("colors: unknown background");
+            return;
+        }
+
+        terminal_background = chosen_color;
+        shell_apply_terminal_color();
+        persist_terminal_color_configuration();
+        print_str("Background updated");
+        print_newline();
+        print_terminal_color_status();
+        return;
+    }
+
+    if (choice == '5') {
+        terminal_foreground = PRINT_COLOR_GREEN;
+        terminal_background = PRINT_COLOR_BLACK;
+        shell_apply_terminal_color();
+        persist_terminal_color_configuration();
+        print_str("Terminal colors reset");
+        print_newline();
+        print_terminal_color_status();
+        return;
+    }
+
+    print_terminal_color_status();
+}
+
 static int maybe_run_config_flow(struct Command* command, char* args) {
     char* command_args = args;
     char* subcommand;
@@ -3235,6 +3795,11 @@ static int maybe_run_config_flow(struct Command* command, char* args) {
         return 1;
     }
 
+    if (strcmp(command->name, "colors") == 0) {
+        cmd_colors_config();
+        return 1;
+    }
+
     return 0;
 }
 
@@ -3243,8 +3808,10 @@ void shell_init(uint32_t multiboot_info_addr) {
     drivers_init();
     network_init();
     vfs_init();
+    shell_apply_terminal_color();
     build_ssh_host_key_fingerprint(ssh_host_key_fingerprint, sizeof(ssh_host_key_fingerprint));
     persist_ssh_configuration();
+    persist_terminal_color_configuration();
     refresh_install_targets();
 }
 
@@ -4769,6 +5336,92 @@ static void cmd_pci(char* args) {
 
 static void cmd_browser(char* args) {
     browser_run(args ? skip_spaces(args) : 0);
+}
+
+static void cmd_colors(char* args) {
+    char* command;
+    uint8_t foreground;
+    uint8_t background;
+
+    if (!args) {
+        print_terminal_color_status();
+        return;
+    }
+
+    command = next_token(&args);
+    if (!command || strcmp(command, "status") == 0) {
+        print_terminal_color_status();
+        return;
+    }
+
+    if (strcmp(command, "config") == 0) {
+        cmd_colors_config();
+        return;
+    }
+
+    if (strcmp(command, "list") == 0) {
+        print_terminal_color_palette();
+        return;
+    }
+
+    if (strcmp(command, "reset") == 0) {
+        terminal_foreground = PRINT_COLOR_GREEN;
+        terminal_background = PRINT_COLOR_BLACK;
+        shell_apply_terminal_color();
+        persist_terminal_color_configuration();
+        print_str("Terminal colors reset");
+        return;
+    }
+
+    if (strcmp(command, "fg") == 0 || strcmp(command, "foreground") == 0) {
+        char* value = args ? next_token(&args) : 0;
+
+        if (!parse_terminal_color(value, &foreground)) {
+            print_str("Usage: colors fg <color-or-number>");
+            return;
+        }
+
+        terminal_foreground = foreground;
+        shell_apply_terminal_color();
+        persist_terminal_color_configuration();
+        print_terminal_color_status();
+        return;
+    }
+
+    if (strcmp(command, "bg") == 0 || strcmp(command, "background") == 0) {
+        char* value = args ? next_token(&args) : 0;
+
+        if (!parse_terminal_color(value, &background)) {
+            print_str("Usage: colors bg <color-or-number>");
+            return;
+        }
+
+        terminal_background = background;
+        shell_apply_terminal_color();
+        persist_terminal_color_configuration();
+        print_terminal_color_status();
+        return;
+    }
+
+    if (strcmp(command, "set") == 0) {
+        char* foreground_text = args ? next_token(&args) : 0;
+        char* background_text = args ? next_token(&args) : 0;
+
+        if (!parse_terminal_color(foreground_text, &foreground)
+            || !parse_terminal_color(background_text, &background)) {
+            print_str("Usage: colors set <foreground> <background>");
+            return;
+        }
+
+        terminal_foreground = foreground;
+        terminal_background = background;
+        shell_apply_terminal_color();
+        persist_terminal_color_configuration();
+        print_terminal_color_status();
+        return;
+    }
+
+    print_str("Usage: colors [status|list|set <fg> <bg>|fg <color>|bg <color>|reset|config]");
 }
 
 static void cmd_shutdown(char* args) {

@@ -10,6 +10,7 @@
 #define NETWORK_MAX_DRIVER_NAME 32
 #define NETWORK_MAX_WIFI_DRIVER_NAME 32
 #define NETWORK_MAX_WIFI_DRIVER_OPTIONS 8
+#define NETWORK_HTTP_STATUS_SIZE 96
 
 enum NetworkMode {
     NETWORK_MODE_DOWN = 0,
@@ -24,6 +25,18 @@ enum NetworkPingResult {
     NETWORK_PING_BAD_TARGET = -3,
     NETWORK_PING_ARP_TIMEOUT = -4,
     NETWORK_PING_TIMEOUT = -5,
+};
+
+enum NetworkHttpResult {
+    NETWORK_HTTP_OK = 0,
+    NETWORK_HTTP_DOWN = -1,
+    NETWORK_HTTP_NO_PACKET_DRIVER = -2,
+    NETWORK_HTTP_BAD_URL = -3,
+    NETWORK_HTTP_DNS_FAILED = -4,
+    NETWORK_HTTP_ARP_TIMEOUT = -5,
+    NETWORK_HTTP_TCP_TIMEOUT = -6,
+    NETWORK_HTTP_RESPONSE_TOO_LARGE = -7,
+    NETWORK_HTTP_HTTPS_NOT_SUPPORTED = -8,
 };
 
 struct NetworkDeviceInfo {
@@ -49,6 +62,7 @@ struct NetworkStatus {
     char ip[NETWORK_MAX_IP_LENGTH];
     char netmask[NETWORK_MAX_IP_LENGTH];
     char gateway[NETWORK_MAX_IP_LENGTH];
+    char dns[NETWORK_MAX_IP_LENGTH];
     int wifi_hardware_present;
     int wifi_profile_saved;
     int wifi_connected;
@@ -78,6 +92,7 @@ struct NetworkStatus network_get_status();
 int network_ping(char* target);
 int network_send_packet(uint8_t* data, uint16_t length);
 int network_receive_packet(uint8_t* buffer, uint16_t* length);
+int network_http_get(char* url, char* body, uint16_t body_size, char* status_text, uint16_t status_size);
 char* network_driver_state();
 char* network_wifi_state();
 

@@ -47,6 +47,12 @@ User goals from this chat
 - Latest follow-up:
   - mouse cursor is too sensitive
   - user asked how to open a website in the new browser
+- New latest follow-up:
+  - after closing the browser, terminal colors leak into a green background / white text state
+  - add terminal color configuration
+- Newest direct request:
+  - make CastleBrowse actually browse websites instead of only showing built-in/about pages
+  - implement real web visiting without leaving it as a placeholder
 
 Important environment context
 - Working directory: /Users/barnabyraynes/Documents/GitHub/CastleOS
@@ -190,6 +196,19 @@ Latest top-level repo changes completed
     - keyboard fallback with Tab, arrows, Enter, Esc
     - built-in about pages for home, network, install, and help
   - WiFi/network code was intentionally left unchanged in network.c as requested.
+- src/impl/x86_64/shell.c
+  - Added terminal color configuration state.
+  - Added /etc/colors.conf to the in-memory VFS.
+  - Added a colors command with:
+    - colors
+    - colors status
+    - colors list
+    - colors set <foreground> <background>
+    - colors fg <color>
+    - colors bg <color>
+    - colors reset
+    - colors config
+  - Browser mode now restores the configured terminal color before clearing and returning to the shell, so browser cursor/button colors do not leak into the normal terminal background.
 
 Latest verification in the top-level repo
 - make build-x86_64 in /Users/barnabyraynes/Documents/GitHub/CastleOS now compiles and links cleanly.
@@ -201,6 +220,16 @@ Latest verification in the top-level repo
   - Booted with rtl8139 and a monitor socket.
   - A boot screenshot file was produced at /tmp/castleos-final-boot.png.
   - This confirms the image boots far enough for monitor capture, but browser visuals and new scroll behavior still want a fuller interactive guest test.
+- Latest color/browser verification:
+  - Host make still compiles and links cleanly; host ISO packaging still fails only because grub-mkrescue is missing.
+  - Docker build with castleos-buildenv completed and regenerated dist/x86_64/CastleOS.iso.
+  - QEMU booted the ISO with e1000.
+  - colors list ran inside the guest and displayed all 16 VGA colors.
+  - browser opened in QEMU, q closed it, and the terminal returned to green-on-black instead of leaking the browser cursor/background colors.
+  - Screenshots created:
+    - /tmp/castleos-colors-list.png
+    - /tmp/castleos-browser-open.png
+    - /tmp/castleos-browser-closed.png
 
 Wireless assessment from the latest inspection
 - drivers.c detects wireless-class PCI devices and stores first_wireless metadata, but does not initialize any wireless hardware.

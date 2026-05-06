@@ -28,6 +28,11 @@ Verified working
     - disk config
     - drivers config
     - ssh config
+    - colors config
+- colors list command
+  - Result: works in QEMU and prints the 0-15 VGA color palette
+- Browser exit colors
+  - Result: opened browser, quit with q, and confirmed the terminal returned to green text on black background instead of keeping the browser cursor/background colors
 
 Known not working
 - e1000 packet driver binding
@@ -132,6 +137,20 @@ Needs user test
     - mouse cursor is visible only in browser mode
     - Home, Network, Install, Help, and Quit buttons work
     - keyboard navigation works with Tab, Left/Right, Enter, and Esc
+  - Result:
+
+- [ ] terminal colors
+  - Boot the ISO
+  - Run: colors config
+  - Try:
+    - 1 for status
+    - 2 for list
+    - 3 to choose foreground
+    - 4 to choose background
+    - 5 to reset
+  - Confirm:
+    - colors set <foreground> <background> also works with names or numbers
+    - clear uses the configured background
   - Result:
 
 - [ ] mouse isolation in shell
