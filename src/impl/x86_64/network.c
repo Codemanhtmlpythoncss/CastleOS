@@ -101,6 +101,7 @@
 #define ETH_TYPE_IPV4 0x0800
 #define ETH_TYPE_ARP 0x0806
 #define IPV4_PROTOCOL_ICMP 1
+#define IPV4_PROTOCOL_TCP 6
 #define IPV4_PROTOCOL_UDP 17
 #define ICMP_ECHO_REPLY 0
 #define ICMP_ECHO_REQUEST 8
@@ -129,6 +130,20 @@
 #define DHCP_BOOTP_WITH_COOKIE_SIZE 240
 #define DHCP_TIMEOUT_MS 2500
 #define DHCP_RETRY_COUNT 3
+#define DNS_SERVER_PORT 53
+#define DNS_DEFAULT_CLIENT_PORT 53530
+#define DNS_TYPE_A 1
+#define DNS_CLASS_IN 1
+#define TCP_FLAG_FIN 0x01
+#define TCP_FLAG_SYN 0x02
+#define TCP_FLAG_RST 0x04
+#define TCP_FLAG_PSH 0x08
+#define TCP_FLAG_ACK 0x10
+#define TCP_HTTP_DEFAULT_PORT 80
+#define TCP_HTTP_SOURCE_PORT_BASE 49152
+#define TCP_CONNECT_TIMEOUT_MS 3000
+#define TCP_RESPONSE_TIMEOUT_MS 6000
+#define NETWORK_HTTP_RAW_RESPONSE_SIZE 4096
 #define NETWORK_PACKET_DRIVER_NONE 0
 #define NETWORK_PACKET_DRIVER_RTL8139 1
 #define NETWORK_PACKET_DRIVER_E1000 2
@@ -160,7 +175,15 @@ struct DhcpLease {
     uint32_t offered_ip;
     uint32_t subnet_mask;
     uint32_t router;
+    uint32_t dns_server;
     uint32_t server_identifier;
+};
+
+struct TcpReceivedSegment {
+    uint32_t sequence;
+    uint32_t acknowledgement;
+    uint16_t data_length;
+    uint8_t flags;
 };
 
 static struct NetworkStatus status;
@@ -176,7 +199,9 @@ static uint8_t e1000_tx_index;
 static uint32_t local_ip;
 static uint32_t local_netmask;
 static uint32_t local_gateway;
+static uint32_t local_dns_server;
 static char wifi_driver_options[NETWORK_MAX_WIFI_DRIVER_OPTIONS][NETWORK_MAX_WIFI_DRIVER_NAME];
+static char http_raw_response[NETWORK_HTTP_RAW_RESPONSE_SIZE];
 
 static uint8_t rtl_rx_buffer[RTL8139_RX_BUFFER_FULL_SIZE] __attribute__((aligned(4)));
 static uint8_t rtl_tx_buffers[RTL8139_TX_BUFFER_COUNT][RTL8139_TX_BUFFER_SIZE] __attribute__((aligned(4)));
@@ -186,6 +211,7 @@ static uint8_t e1000_rx_buffers[E1000_RX_DESC_COUNT][E1000_BUFFER_SIZE] __attrib
 static uint8_t e1000_tx_buffers[E1000_TX_DESC_COUNT][E1000_BUFFER_SIZE] __attribute__((aligned(16)));
 
 static void process_incoming_arp(uint8_t* packet, uint16_t length);
+static int resolve_mac(uint32_t target_ip, uint8_t* resolved_mac);
 static int wifi_can_use_simulated_link();
 static void enable_wifi_simulated_link();
 static int qca6174_probe(uint16_t vendor_id,
@@ -295,6 +321,86 @@ static int string_equals(const char* a, const char* b) {
     }
 
     return *a == '\0' && *b == '\0';
+}
+
+static size_t string_length_local(const char* text) {
+    size_t length = 0;
+
+    if (!text) {
+        return 0;
+    }
+
+    while (text[length] != '\0') {
+        length++;
+    }
+
+    return length;
+}
+
+static int string_starts_with(const char* text, const char* prefix) {
+    if (!text || !prefix) {
+        return 0;
+    }
+
+    while (*prefix) {
+        if (*text != *prefix) {
+            return 0;
+        }
+
+        text++;
+        prefix++;
+    }
+
+    return 1;
+}
+
+static void append_char_local(char* destination, size_t destination_size, char character) {
+    size_t length = string_length_local(destination);
+
+    if (length + 1 >= destination_size) {
+        return;
+    }
+
+    destination[length] = character;
+    destination[length + 1] = '\0';
+}
+
+static void append_string_local(char* destination, size_t destination_size, const char* source) {
+    if (!source) {
+        return;
+    }
+
+    while (*source) {
+        append_char_local(destination, destination_size, *source);
+        source++;
+    }
+}
+
+static void append_u16_local(char* destination, size_t destination_size, uint16_t value) {
+    char digits[5];
+    size_t index = 0;
+
+    if (value == 0) {
+        append_char_local(destination, destination_size, '0');
+        return;
+    }
+
+    while (value > 0 && index < sizeof(digits)) {
+        digits[index++] = (char) ('0' + (value % 10));
+        value /= 10;
+    }
+
+    while (index > 0) {
+        append_char_local(destination, destination_size, digits[--index]);
+    }
+}
+
+static void set_status_text(char* status_text, uint16_t status_size, const char* text) {
+    if (!status_text || status_size == 0) {
+        return;
+    }
+
+    copy_string(status_text, status_size, (char*) (text ? text : ""));
 }
 
 static void clear_wifi_driver_options() {
@@ -692,6 +798,12 @@ static void set_ip_config(uint32_t ip, uint32_t netmask, uint32_t gateway) {
     ip_to_string(local_ip, status.ip, sizeof(status.ip));
     ip_to_string(local_netmask, status.netmask, sizeof(status.netmask));
     ip_to_string(local_gateway, status.gateway, sizeof(status.gateway));
+
+    if (local_dns_server == 0) {
+        local_dns_server = gateway;
+    }
+
+    ip_to_string(local_dns_server, status.dns, sizeof(status.dns));
 }
 
 static int ip_is_in_subnet(uint32_t ip, uint32_t subnet_ip, uint32_t netmask) {
@@ -733,6 +845,7 @@ static void clear_network_status() {
     status.ip[0] = '\0';
     status.netmask[0] = '\0';
     status.gateway[0] = '\0';
+    status.dns[0] = '\0';
     status.wifi_hardware_present = 0;
     status.wifi_profile_saved = 0;
     status.wifi_connected = 0;
@@ -770,6 +883,7 @@ static void clear_network_status() {
     local_ip = 0;
     local_netmask = 0;
     local_gateway = 0;
+    local_dns_server = 0;
 }
 
 void network_wifi_rescan() {
@@ -1009,7 +1123,12 @@ static int e1000_init(uint8_t bus, uint8_t slot, uint8_t function) {
 
     if (status.mac[0] == 0 && status.mac[1] == 0 && status.mac[2] == 0
         && status.mac[3] == 0 && status.mac[4] == 0 && status.mac[5] == 0) {
-        return 0;
+        status.mac[0] = 0x52;
+        status.mac[1] = 0x43;
+        status.mac[2] = 0x41;
+        status.mac[3] = 0x57;
+        status.mac[4] = 0x00;
+        status.mac[5] = 0x01;
     }
 
     status.packet_driver_ready = 1;
@@ -1404,6 +1523,8 @@ static void parse_dhcp_options(uint8_t* options, uint16_t options_length, struct
             lease->subnet_mask = read_be32(options + index);
         } else if (option == DHCP_OPTION_ROUTER && option_length >= 4) {
             lease->router = read_be32(options + index);
+        } else if (option == DHCP_OPTION_DNS && option_length >= 4) {
+            lease->dns_server = read_be32(options + index);
         } else if (option == DHCP_OPTION_SERVER_IDENTIFIER && option_length >= 4) {
             lease->server_identifier = read_be32(options + index);
         }
@@ -1536,6 +1657,7 @@ static int dhcp_acquire_lease() {
 
         subnet_mask = ack.subnet_mask ? ack.subnet_mask : (offer.subnet_mask ? offer.subnet_mask : default_netmask);
         gateway = gateway_for_dhcp_lease(&ack, &offer, ack.offered_ip, subnet_mask);
+        local_dns_server = ack.dns_server ? ack.dns_server : offer.dns_server;
         set_ip_config(ack.offered_ip, subnet_mask, gateway);
         return 1;
     }
@@ -1679,6 +1801,893 @@ static int wait_for_icmp_reply(uint32_t target_ip, uint16_t sequence) {
     }
 
     return 0;
+}
+
+static int send_udp_payload(uint32_t target_ip,
+                            uint16_t source_port,
+                            uint16_t destination_port,
+                            uint8_t* payload,
+                            uint16_t payload_length) {
+    uint8_t packet[NETWORK_MAX_PACKET_SIZE];
+    uint8_t next_hop_mac[NETWORK_MAC_LENGTH];
+    uint32_t next_hop_ip;
+    uint16_t udp_length = (uint16_t) (8 + payload_length);
+    uint16_t ip_total_length = (uint16_t) (20 + udp_length);
+
+    if (!status.enabled || !status.packet_driver_ready || payload_length + 42 > NETWORK_MAX_PACKET_SIZE) {
+        return 0;
+    }
+
+    next_hop_ip = ((target_ip & local_netmask) == (local_ip & local_netmask)) ? target_ip : local_gateway;
+    if (next_hop_ip == 0 || !resolve_mac(next_hop_ip, next_hop_mac)) {
+        return 0;
+    }
+
+    memory_set(packet, 0, sizeof(packet));
+    build_ethernet_header(packet, next_hop_mac, ETH_TYPE_IPV4);
+
+    packet[14] = 0x45;
+    packet[15] = 0;
+    write_be16(packet + 16, ip_total_length);
+    write_be16(packet + 18, (uint16_t) get_time_ms());
+    write_be16(packet + 20, 0);
+    packet[22] = 64;
+    packet[23] = IPV4_PROTOCOL_UDP;
+    write_be32(packet + 26, local_ip);
+    write_be32(packet + 30, target_ip);
+    write_be16(packet + 24, checksum16(packet + 14, 20));
+
+    write_be16(packet + 34, source_port);
+    write_be16(packet + 36, destination_port);
+    write_be16(packet + 38, udp_length);
+    write_be16(packet + 40, 0);
+    memory_copy(packet + 42, payload, payload_length);
+
+    return network_send_packet(packet, (uint16_t) (14 + ip_total_length));
+}
+
+static int wait_for_udp_payload(uint32_t source_ip,
+                                uint16_t source_port,
+                                uint16_t destination_port,
+                                uint8_t* payload,
+                                uint16_t* payload_length,
+                                uint16_t payload_capacity,
+                                uint32_t timeout_ms) {
+    uint8_t received[NETWORK_MAX_PACKET_SIZE];
+    uint16_t received_length;
+    uint64_t deadline = get_time_ms() + timeout_ms;
+
+    while (get_time_ms() < deadline) {
+        uint16_t ethernet_type;
+        uint16_t ip_header_length;
+        uint16_t udp_offset;
+        uint16_t udp_length;
+        uint16_t data_length;
+
+        if (!network_receive_packet(received, &received_length)) {
+            continue;
+        }
+
+        if (received_length < 42) {
+            continue;
+        }
+
+        ethernet_type = read_be16(received + 12);
+        if (ethernet_type == ETH_TYPE_ARP) {
+            process_incoming_arp(received, received_length);
+            continue;
+        }
+
+        if (ethernet_type != ETH_TYPE_IPV4 || received[23] != IPV4_PROTOCOL_UDP) {
+            continue;
+        }
+
+        if (read_be32(received + 26) != source_ip || read_be32(received + 30) != local_ip) {
+            continue;
+        }
+
+        ip_header_length = (uint16_t) ((received[14] & 0x0F) * 4);
+        udp_offset = (uint16_t) (14 + ip_header_length);
+        if (received_length < udp_offset + 8) {
+            continue;
+        }
+
+        if (read_be16(received + udp_offset) != source_port
+            || read_be16(received + udp_offset + 2) != destination_port) {
+            continue;
+        }
+
+        udp_length = read_be16(received + udp_offset + 4);
+        if (udp_length < 8) {
+            continue;
+        }
+
+        data_length = (uint16_t) (udp_length - 8);
+        if (data_length > payload_capacity) {
+            data_length = payload_capacity;
+        }
+
+        memory_copy(payload, received + udp_offset + 8, data_length);
+        *payload_length = data_length;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int encode_dns_name(char* host, uint8_t* output, uint16_t output_capacity, uint16_t* output_length) {
+    uint16_t output_index = 0;
+    uint16_t label_length_index = 0;
+    uint8_t label_length = 0;
+
+    if (!host || !output || !output_length || host[0] == '\0' || output_capacity < 2) {
+        return 0;
+    }
+
+    output_index = 1;
+
+    for (uint16_t input_index = 0; ; input_index++) {
+        char character = host[input_index];
+
+        if (character == '.' || character == '\0') {
+            if (label_length == 0 || label_length > 63) {
+                return 0;
+            }
+
+            output[label_length_index] = label_length;
+            label_length = 0;
+
+            if (character == '\0') {
+                if (output_index >= output_capacity) {
+                    return 0;
+                }
+
+                output[output_index++] = 0;
+                *output_length = output_index;
+                return 1;
+            }
+
+            if (output_index >= output_capacity) {
+                return 0;
+            }
+
+            label_length_index = output_index++;
+            continue;
+        }
+
+        if (output_index >= output_capacity) {
+            return 0;
+        }
+
+        output[output_index++] = (uint8_t) character;
+        label_length++;
+    }
+}
+
+static int skip_dns_name(uint8_t* message, uint16_t message_length, uint16_t* offset) {
+    while (*offset < message_length) {
+        uint8_t length = message[*offset];
+
+        if (length == 0) {
+            (*offset)++;
+            return 1;
+        }
+
+        if ((length & 0xC0) == 0xC0) {
+            if (*offset + 1 >= message_length) {
+                return 0;
+            }
+
+            *offset = (uint16_t) (*offset + 2);
+            return 1;
+        }
+
+        if ((uint16_t) (*offset + 1 + length) > message_length) {
+            return 0;
+        }
+
+        *offset = (uint16_t) (*offset + 1 + length);
+    }
+
+    return 0;
+}
+
+static int dns_resolve(char* host, uint32_t* resolved_ip) {
+    uint8_t query[256];
+    uint8_t response[512];
+    uint16_t query_length;
+    uint16_t response_length = 0;
+    uint16_t name_length;
+    uint16_t offset;
+    uint16_t answer_count;
+    uint16_t client_port;
+    uint16_t transaction_id;
+
+    if (parse_ipv4(host, resolved_ip)) {
+        return 1;
+    }
+
+    if (local_dns_server == 0) {
+        return 0;
+    }
+
+    memory_set(query, 0, sizeof(query));
+    transaction_id = (uint16_t) (0xCA57u ^ (uint16_t) get_time_ms());
+    write_be16(query + 0, transaction_id);
+    write_be16(query + 2, 0x0100);
+    write_be16(query + 4, 1);
+    write_be16(query + 6, 0);
+    write_be16(query + 8, 0);
+    write_be16(query + 10, 0);
+
+    if (!encode_dns_name(host, query + 12, (uint16_t) (sizeof(query) - 12), &name_length)) {
+        return 0;
+    }
+
+    query_length = (uint16_t) (12 + name_length + 4);
+    write_be16(query + 12 + name_length, DNS_TYPE_A);
+    write_be16(query + 12 + name_length + 2, DNS_CLASS_IN);
+
+    client_port = (uint16_t) (DNS_DEFAULT_CLIENT_PORT + (uint16_t) (get_time_ms() & 0x03FF));
+    if (!send_udp_payload(local_dns_server, client_port, DNS_SERVER_PORT, query, query_length)) {
+        return 0;
+    }
+
+    if (!wait_for_udp_payload(local_dns_server,
+                              DNS_SERVER_PORT,
+                              client_port,
+                              response,
+                              &response_length,
+                              sizeof(response),
+                              3000)) {
+        return 0;
+    }
+
+    if (response_length < 12 || read_be16(response) != transaction_id) {
+        return 0;
+    }
+
+    answer_count = read_be16(response + 6);
+    offset = 12;
+
+    if (!skip_dns_name(response, response_length, &offset) || offset + 4 > response_length) {
+        return 0;
+    }
+
+    offset = (uint16_t) (offset + 4);
+
+    for (uint16_t answer_index = 0; answer_index < answer_count; answer_index++) {
+        uint16_t record_type;
+        uint16_t record_class;
+        uint16_t data_length;
+
+        if (!skip_dns_name(response, response_length, &offset) || offset + 10 > response_length) {
+            return 0;
+        }
+
+        record_type = read_be16(response + offset);
+        record_class = read_be16(response + offset + 2);
+        data_length = read_be16(response + offset + 8);
+        offset = (uint16_t) (offset + 10);
+
+        if (offset + data_length > response_length) {
+            return 0;
+        }
+
+        if (record_type == DNS_TYPE_A && record_class == DNS_CLASS_IN && data_length == 4) {
+            *resolved_ip = read_be32(response + offset);
+            return 1;
+        }
+
+        offset = (uint16_t) (offset + data_length);
+    }
+
+    return 0;
+}
+
+static uint16_t checksum16_pseudo(uint32_t source_ip,
+                                  uint32_t destination_ip,
+                                  uint8_t protocol,
+                                  uint8_t* payload,
+                                  uint16_t payload_length) {
+    uint32_t sum = 0;
+
+    sum += (source_ip >> 16) & 0xFFFF;
+    sum += source_ip & 0xFFFF;
+    sum += (destination_ip >> 16) & 0xFFFF;
+    sum += destination_ip & 0xFFFF;
+    sum += protocol;
+    sum += payload_length;
+
+    for (uint16_t i = 0; i < payload_length; i += 2) {
+        uint16_t word = (uint16_t) payload[i] << 8;
+
+        if (i + 1 < payload_length) {
+            word |= payload[i + 1];
+        }
+
+        sum += word;
+    }
+
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    return (uint16_t) ~sum;
+}
+
+static int send_tcp_segment(uint32_t target_ip,
+                            uint8_t* target_mac,
+                            uint16_t source_port,
+                            uint16_t destination_port,
+                            uint32_t sequence,
+                            uint32_t acknowledgement,
+                            uint8_t flags,
+                            uint8_t* payload,
+                            uint16_t payload_length,
+                            int include_mss) {
+    uint8_t packet[NETWORK_MAX_PACKET_SIZE];
+    uint16_t tcp_header_length = include_mss ? 24 : 20;
+    uint16_t tcp_length = (uint16_t) (tcp_header_length + payload_length);
+    uint16_t ip_total_length = (uint16_t) (20 + tcp_length);
+    uint16_t tcp_offset = 34;
+
+    if (!target_mac || tcp_length + 34 > NETWORK_MAX_PACKET_SIZE) {
+        return 0;
+    }
+
+    memory_set(packet, 0, sizeof(packet));
+    build_ethernet_header(packet, target_mac, ETH_TYPE_IPV4);
+
+    packet[14] = 0x45;
+    packet[15] = 0;
+    write_be16(packet + 16, ip_total_length);
+    write_be16(packet + 18, (uint16_t) get_time_ms());
+    write_be16(packet + 20, 0);
+    packet[22] = 64;
+    packet[23] = IPV4_PROTOCOL_TCP;
+    write_be32(packet + 26, local_ip);
+    write_be32(packet + 30, target_ip);
+    write_be16(packet + 24, checksum16(packet + 14, 20));
+
+    write_be16(packet + tcp_offset, source_port);
+    write_be16(packet + tcp_offset + 2, destination_port);
+    write_be32(packet + tcp_offset + 4, sequence);
+    write_be32(packet + tcp_offset + 8, acknowledgement);
+    packet[tcp_offset + 12] = (uint8_t) ((tcp_header_length / 4) << 4);
+    packet[tcp_offset + 13] = flags;
+    write_be16(packet + tcp_offset + 14, 4096);
+    write_be16(packet + tcp_offset + 16, 0);
+    write_be16(packet + tcp_offset + 18, 0);
+
+    if (include_mss) {
+        packet[tcp_offset + 20] = 2;
+        packet[tcp_offset + 21] = 4;
+        write_be16(packet + tcp_offset + 22, 1460);
+    }
+
+    if (payload_length > 0 && payload) {
+        memory_copy(packet + tcp_offset + tcp_header_length, payload, payload_length);
+    }
+
+    write_be16(packet + tcp_offset + 16,
+               checksum16_pseudo(local_ip, target_ip, IPV4_PROTOCOL_TCP, packet + tcp_offset, tcp_length));
+
+    return network_send_packet(packet, (uint16_t) (14 + ip_total_length));
+}
+
+static int wait_for_tcp_segment(uint32_t source_ip,
+                                uint16_t source_port,
+                                uint16_t destination_port,
+                                struct TcpReceivedSegment* segment,
+                                uint8_t* payload,
+                                uint16_t payload_capacity,
+                                uint32_t timeout_ms) {
+    uint8_t received[NETWORK_MAX_PACKET_SIZE];
+    uint16_t received_length;
+    uint64_t deadline = get_time_ms() + timeout_ms;
+
+    while (get_time_ms() < deadline) {
+        uint16_t ethernet_type;
+        uint16_t ip_header_length;
+        uint16_t ip_total_length;
+        uint16_t tcp_offset;
+        uint16_t tcp_header_length;
+        uint16_t data_length;
+
+        if (!network_receive_packet(received, &received_length)) {
+            continue;
+        }
+
+        if (received_length < 54) {
+            continue;
+        }
+
+        ethernet_type = read_be16(received + 12);
+        if (ethernet_type == ETH_TYPE_ARP) {
+            process_incoming_arp(received, received_length);
+            continue;
+        }
+
+        if (ethernet_type != ETH_TYPE_IPV4 || received[23] != IPV4_PROTOCOL_TCP) {
+            continue;
+        }
+
+        if (read_be32(received + 26) != source_ip || read_be32(received + 30) != local_ip) {
+            continue;
+        }
+
+        ip_header_length = (uint16_t) ((received[14] & 0x0F) * 4);
+        ip_total_length = read_be16(received + 16);
+        tcp_offset = (uint16_t) (14 + ip_header_length);
+
+        if (received_length < tcp_offset + 20 || ip_total_length < ip_header_length + 20) {
+            continue;
+        }
+
+        if (read_be16(received + tcp_offset) != source_port
+            || read_be16(received + tcp_offset + 2) != destination_port) {
+            continue;
+        }
+
+        tcp_header_length = (uint16_t) ((received[tcp_offset + 12] >> 4) * 4);
+        if (tcp_header_length < 20 || ip_total_length < ip_header_length + tcp_header_length) {
+            continue;
+        }
+
+        data_length = (uint16_t) (ip_total_length - ip_header_length - tcp_header_length);
+        if (data_length > payload_capacity) {
+            data_length = payload_capacity;
+        }
+
+        if (data_length > 0 && payload) {
+            memory_copy(payload, received + tcp_offset + tcp_header_length, data_length);
+        }
+
+        segment->sequence = read_be32(received + tcp_offset + 4);
+        segment->acknowledgement = read_be32(received + tcp_offset + 8);
+        segment->flags = received[tcp_offset + 13];
+        segment->data_length = data_length;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int parse_http_url(char* url,
+                          char* host,
+                          uint16_t host_size,
+                          char* path,
+                          uint16_t path_size,
+                          uint16_t* port) {
+    char* cursor = url;
+    uint16_t host_index = 0;
+    uint16_t path_index = 0;
+
+    if (!url || !host || !path || !port) {
+        return 0;
+    }
+
+    if (string_starts_with(cursor, "https://")) {
+        return NETWORK_HTTP_HTTPS_NOT_SUPPORTED;
+    }
+
+    if (string_starts_with(cursor, "http://")) {
+        cursor += 7;
+    }
+
+    if (*cursor == '\0') {
+        return 0;
+    }
+
+    *port = TCP_HTTP_DEFAULT_PORT;
+
+    while (*cursor != '\0' && *cursor != '/' && *cursor != ':' && host_index + 1 < host_size) {
+        host[host_index++] = *cursor++;
+    }
+    host[host_index] = '\0';
+
+    if (host[0] == '\0') {
+        return 0;
+    }
+
+    if (*cursor == ':') {
+        uint16_t parsed_port = 0;
+
+        cursor++;
+        if (*cursor < '0' || *cursor > '9') {
+            return 0;
+        }
+
+        while (*cursor >= '0' && *cursor <= '9') {
+            parsed_port = (uint16_t) (parsed_port * 10 + (uint16_t) (*cursor - '0'));
+            cursor++;
+        }
+
+        if (parsed_port == 0) {
+            return 0;
+        }
+
+        *port = parsed_port;
+    }
+
+    if (*cursor == '\0') {
+        copy_string(path, path_size, "/");
+        return 1;
+    }
+
+    if (*cursor != '/') {
+        return 0;
+    }
+
+    while (*cursor != '\0' && path_index + 1 < path_size) {
+        path[path_index++] = *cursor++;
+    }
+    path[path_index] = '\0';
+    return 1;
+}
+
+static int copy_http_body(char* raw_response,
+                          uint16_t raw_length,
+                          char* body,
+                          uint16_t body_size,
+                          char* status_text,
+                          uint16_t status_size,
+                          char* redirect_url,
+                          uint16_t redirect_url_size) {
+    uint16_t header_end = 0;
+    uint16_t status_line_end = 0;
+    uint16_t body_index = 0;
+    uint16_t status_code = 0;
+
+    body[0] = '\0';
+    redirect_url[0] = '\0';
+
+    for (uint16_t i = 0; i + 3 < raw_length; i++) {
+        if (raw_response[i] == '\r' && raw_response[i + 1] == '\n'
+            && raw_response[i + 2] == '\r' && raw_response[i + 3] == '\n') {
+            header_end = (uint16_t) (i + 4);
+            break;
+        }
+    }
+
+    if (header_end == 0) {
+        for (uint16_t i = 0; i + 1 < raw_length; i++) {
+            if (raw_response[i] == '\n' && raw_response[i + 1] == '\n') {
+                header_end = (uint16_t) (i + 2);
+                break;
+            }
+        }
+    }
+
+    if (header_end == 0) {
+        header_end = 0;
+    }
+
+    while (status_line_end < raw_length
+           && raw_response[status_line_end] != '\r'
+           && raw_response[status_line_end] != '\n') {
+        if (status_line_end + 1 < status_size) {
+            status_text[status_line_end] = raw_response[status_line_end];
+            status_text[status_line_end + 1] = '\0';
+        }
+        status_line_end++;
+    }
+
+    if (status_line_end == 0) {
+        set_status_text(status_text, status_size, "HTTP response received");
+    }
+
+    if (string_starts_with(raw_response, "HTTP/") && raw_length > 12) {
+        for (uint16_t i = 0; i < raw_length && raw_response[i] != '\r' && raw_response[i] != '\n'; i++) {
+            if (raw_response[i] == ' '
+                && raw_response[i + 1] >= '0' && raw_response[i + 1] <= '9'
+                && raw_response[i + 2] >= '0' && raw_response[i + 2] <= '9'
+                && raw_response[i + 3] >= '0' && raw_response[i + 3] <= '9') {
+                status_code = (uint16_t) ((raw_response[i + 1] - '0') * 100
+                    + (raw_response[i + 2] - '0') * 10
+                    + (raw_response[i + 3] - '0'));
+                break;
+            }
+        }
+    }
+
+    if (status_code >= 300 && status_code < 400) {
+        for (uint16_t i = 0; i + 9 < header_end; i++) {
+            if ((raw_response[i] == 'L' || raw_response[i] == 'l')
+                && (raw_response[i + 1] == 'o' || raw_response[i + 1] == 'O')
+                && (raw_response[i + 2] == 'c' || raw_response[i + 2] == 'C')
+                && (raw_response[i + 3] == 'a' || raw_response[i + 3] == 'A')
+                && (raw_response[i + 4] == 't' || raw_response[i + 4] == 'T')
+                && (raw_response[i + 5] == 'i' || raw_response[i + 5] == 'I')
+                && (raw_response[i + 6] == 'o' || raw_response[i + 6] == 'O')
+                && (raw_response[i + 7] == 'n' || raw_response[i + 7] == 'N')
+                && raw_response[i + 8] == ':') {
+                uint16_t location_index = (uint16_t) (i + 9);
+
+                while (location_index < header_end
+                       && (raw_response[location_index] == ' ' || raw_response[location_index] == '\t')) {
+                    location_index++;
+                }
+
+                while (location_index < header_end
+                       && raw_response[location_index] != '\r'
+                       && raw_response[location_index] != '\n'
+                       && string_length_local(redirect_url) + 1 < redirect_url_size) {
+                    append_char_local(redirect_url, redirect_url_size, raw_response[location_index++]);
+                }
+                break;
+            }
+        }
+    }
+
+    if (header_end > raw_length) {
+        header_end = raw_length;
+    }
+
+    for (uint16_t i = header_end; i < raw_length && body_index + 1 < body_size; i++) {
+        body[body_index++] = raw_response[i];
+    }
+    body[body_index] = '\0';
+
+    return status_code;
+}
+
+static int network_http_get_once(char* url,
+                                 char* body,
+                                 uint16_t body_size,
+                                 char* status_text,
+                                 uint16_t status_size,
+                                 char* redirect_url,
+                                 uint16_t redirect_url_size) {
+    char host[80];
+    char path[192];
+    char request[384];
+    uint16_t port;
+    uint32_t target_ip;
+    uint32_t next_hop_ip;
+    uint8_t next_hop_mac[NETWORK_MAC_LENGTH];
+    uint16_t source_port;
+    uint32_t local_sequence;
+    uint32_t remote_next_sequence;
+    struct TcpReceivedSegment segment;
+    uint8_t tcp_payload[1024];
+    uint16_t raw_length = 0;
+    uint64_t response_deadline;
+    int parse_result;
+
+    parse_result = parse_http_url(url, host, sizeof(host), path, sizeof(path), &port);
+    if (parse_result == NETWORK_HTTP_HTTPS_NOT_SUPPORTED) {
+        set_status_text(status_text, status_size, "HTTPS needs TLS; use an http:// URL");
+        return NETWORK_HTTP_HTTPS_NOT_SUPPORTED;
+    }
+
+    if (!parse_result) {
+        set_status_text(status_text, status_size, "Bad URL");
+        return NETWORK_HTTP_BAD_URL;
+    }
+
+    if (!dns_resolve(host, &target_ip)) {
+        set_status_text(status_text, status_size, "DNS lookup failed");
+        return NETWORK_HTTP_DNS_FAILED;
+    }
+
+    next_hop_ip = ((target_ip & local_netmask) == (local_ip & local_netmask)) ? target_ip : local_gateway;
+    if (next_hop_ip == 0 || !resolve_mac(next_hop_ip, next_hop_mac)) {
+        set_status_text(status_text, status_size, "ARP lookup timed out");
+        return NETWORK_HTTP_ARP_TIMEOUT;
+    }
+
+    source_port = (uint16_t) (TCP_HTTP_SOURCE_PORT_BASE + (uint16_t) (get_time_ms() & 0x0FFF));
+    local_sequence = 0xCA570000u ^ (uint32_t) get_time_ms();
+
+    if (!send_tcp_segment(target_ip,
+                          next_hop_mac,
+                          source_port,
+                          port,
+                          local_sequence,
+                          0,
+                          TCP_FLAG_SYN,
+                          0,
+                          0,
+                          1)) {
+        set_status_text(status_text, status_size, "TCP SYN failed");
+        return NETWORK_HTTP_TCP_TIMEOUT;
+    }
+
+    if (!wait_for_tcp_segment(target_ip,
+                              port,
+                              source_port,
+                              &segment,
+                              tcp_payload,
+                              sizeof(tcp_payload),
+                              TCP_CONNECT_TIMEOUT_MS)
+        || (segment.flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) != (TCP_FLAG_SYN | TCP_FLAG_ACK)) {
+        set_status_text(status_text, status_size, "TCP connect timed out");
+        return NETWORK_HTTP_TCP_TIMEOUT;
+    }
+
+    local_sequence++;
+    remote_next_sequence = segment.sequence + 1;
+
+    send_tcp_segment(target_ip,
+                     next_hop_mac,
+                     source_port,
+                     port,
+                     local_sequence,
+                     remote_next_sequence,
+                     TCP_FLAG_ACK,
+                     0,
+                     0,
+                     0);
+
+    copy_string(request, sizeof(request), "GET ");
+    append_string_local(request, sizeof(request), path);
+    append_string_local(request, sizeof(request), " HTTP/1.0\r\nHost: ");
+    append_string_local(request, sizeof(request), host);
+    append_string_local(request, sizeof(request), "\r\nUser-Agent: CastleBrowse/0.1\r\nAccept: text/html,text/plain,*/*\r\nConnection: close\r\n\r\n");
+
+    if (!send_tcp_segment(target_ip,
+                          next_hop_mac,
+                          source_port,
+                          port,
+                          local_sequence,
+                          remote_next_sequence,
+                          TCP_FLAG_ACK | TCP_FLAG_PSH,
+                          (uint8_t*) request,
+                          (uint16_t) string_length_local(request),
+                          0)) {
+        set_status_text(status_text, status_size, "HTTP request send failed");
+        return NETWORK_HTTP_TCP_TIMEOUT;
+    }
+
+    local_sequence += (uint32_t) string_length_local(request);
+    response_deadline = get_time_ms() + TCP_RESPONSE_TIMEOUT_MS;
+    http_raw_response[0] = '\0';
+
+    while (get_time_ms() < response_deadline && raw_length + 1 < sizeof(http_raw_response)) {
+        if (!wait_for_tcp_segment(target_ip,
+                                  port,
+                                  source_port,
+                                  &segment,
+                                  tcp_payload,
+                                  sizeof(tcp_payload),
+                                  600)) {
+            continue;
+        }
+
+        if (segment.flags & TCP_FLAG_RST) {
+            set_status_text(status_text, status_size, "Connection reset");
+            return NETWORK_HTTP_TCP_TIMEOUT;
+        }
+
+        if (segment.data_length > 0 && segment.sequence == remote_next_sequence) {
+            uint16_t copy_length = segment.data_length;
+
+            if (raw_length + copy_length + 1 >= sizeof(http_raw_response)) {
+                copy_length = (uint16_t) (sizeof(http_raw_response) - raw_length - 1);
+            }
+
+            memory_copy((uint8_t*) http_raw_response + raw_length, tcp_payload, copy_length);
+            raw_length = (uint16_t) (raw_length + copy_length);
+            http_raw_response[raw_length] = '\0';
+            remote_next_sequence += segment.data_length;
+
+            send_tcp_segment(target_ip,
+                             next_hop_mac,
+                             source_port,
+                             port,
+                             local_sequence,
+                             remote_next_sequence,
+                             TCP_FLAG_ACK,
+                             0,
+                             0,
+                             0);
+        } else if (segment.data_length > 0 && segment.sequence < remote_next_sequence) {
+            send_tcp_segment(target_ip,
+                             next_hop_mac,
+                             source_port,
+                             port,
+                             local_sequence,
+                             remote_next_sequence,
+                             TCP_FLAG_ACK,
+                             0,
+                             0,
+                             0);
+        }
+
+        if (segment.flags & TCP_FLAG_FIN) {
+            remote_next_sequence++;
+            send_tcp_segment(target_ip,
+                             next_hop_mac,
+                             source_port,
+                             port,
+                             local_sequence,
+                             remote_next_sequence,
+                             TCP_FLAG_ACK | TCP_FLAG_FIN,
+                             0,
+                             0,
+                             0);
+            break;
+        }
+    }
+
+    if (raw_length == 0) {
+        set_status_text(status_text, status_size, "No HTTP response body received");
+        return NETWORK_HTTP_TCP_TIMEOUT;
+    }
+
+    copy_http_body(http_raw_response,
+                   raw_length,
+                   body,
+                   body_size,
+                   status_text,
+                   status_size,
+                   redirect_url,
+                   redirect_url_size);
+
+    if (raw_length + 1 >= sizeof(http_raw_response)) {
+        return NETWORK_HTTP_RESPONSE_TOO_LARGE;
+    }
+
+    return NETWORK_HTTP_OK;
+}
+
+int network_http_get(char* url, char* body, uint16_t body_size, char* status_text, uint16_t status_size) {
+    char current_url[160];
+    char redirect_url[160];
+    int result;
+
+    if (!body || body_size == 0) {
+        return NETWORK_HTTP_BAD_URL;
+    }
+
+    body[0] = '\0';
+    set_status_text(status_text, status_size, "");
+
+    if (!status.enabled) {
+        network_enable_dhcp();
+    }
+
+    if (!status.enabled) {
+        set_status_text(status_text, status_size, "Network is down");
+        return NETWORK_HTTP_DOWN;
+    }
+
+    if (!status.packet_driver_ready) {
+        set_status_text(status_text, status_size, "No packet driver is loaded");
+        return NETWORK_HTTP_NO_PACKET_DRIVER;
+    }
+
+    copy_string(current_url, sizeof(current_url), url && url[0] ? url : "http://example.com/");
+
+    for (uint8_t redirect_count = 0; redirect_count < 3; redirect_count++) {
+        redirect_url[0] = '\0';
+        result = network_http_get_once(current_url,
+                                       body,
+                                       body_size,
+                                       status_text,
+                                       status_size,
+                                       redirect_url,
+                                       sizeof(redirect_url));
+
+        if (result != NETWORK_HTTP_OK || redirect_url[0] == '\0') {
+            return result;
+        }
+
+        if (!string_starts_with(redirect_url, "http://")) {
+            copy_string(body, body_size, "This page redirected to ");
+            append_string_local(body, body_size, redirect_url);
+            append_string_local(body, body_size, "\nCastleBrowse can fetch plain HTTP pages from the network stack.");
+            set_status_text(status_text, status_size, "Redirect received");
+            return NETWORK_HTTP_OK;
+        }
+
+        copy_string(current_url, sizeof(current_url), redirect_url);
+    }
+
+    set_status_text(status_text, status_size, "Too many redirects");
+    return NETWORK_HTTP_TCP_TIMEOUT;
 }
 
 static int wifi_can_use_simulated_link() {
@@ -1830,9 +2839,11 @@ int network_enable_dhcp() {
     local_ip = 0;
     local_netmask = 0;
     local_gateway = 0;
+    local_dns_server = 0;
     status.ip[0] = '\0';
     status.netmask[0] = '\0';
     status.gateway[0] = '\0';
+    status.dns[0] = '\0';
 
     if (!dhcp_acquire_lease()) {
         network_disable();
@@ -1862,6 +2873,7 @@ void network_set_static(char* ip, char* netmask, char* gateway) {
         copy_string(status.ip, sizeof(status.ip), ip);
         copy_string(status.netmask, sizeof(status.netmask), netmask);
         copy_string(status.gateway, sizeof(status.gateway), gateway);
+        copy_string(status.dns, sizeof(status.dns), gateway);
         return;
     }
 
@@ -1880,9 +2892,11 @@ void network_disable() {
     status.ip[0] = '\0';
     status.netmask[0] = '\0';
     status.gateway[0] = '\0';
+    status.dns[0] = '\0';
     local_ip = 0;
     local_netmask = 0;
     local_gateway = 0;
+    local_dns_server = 0;
 }
 
 int network_wifi_connect(char* ssid, char* password) {
