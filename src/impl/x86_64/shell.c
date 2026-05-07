@@ -717,7 +717,8 @@ static void vfs_init() {
     home_notes = vfs_create_file(home_directory, "notes.txt",
         "CastleOS virtual filesystem\n"
         "This file lives in memory only.\n"
-        "Use nano to edit it.\n");
+        "Use nano to edit it.\n"
+		"Barnaby was here 0 0");
     vfs_create_file(home_directory, "todo.txt",
         "Build disk drivers\n"
         "Add a real filesystem\n"
