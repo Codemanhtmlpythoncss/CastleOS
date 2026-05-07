@@ -16,5 +16,7 @@ void kernel_main(uint32_t multiboot_info_addr) {
 	keyboard_init();
 	mouse_init();
 	shell_init(multiboot_info_addr);
+	print_newline();
+	print_str("Shell Loaded!");
 	shell_run();
 }
