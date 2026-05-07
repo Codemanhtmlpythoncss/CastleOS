@@ -2769,7 +2769,7 @@ void shell_init(uint32_t multiboot_info_addr) {
     persist_ssh_configuration();
     refresh_install_targets();
 }
-
+help
 static void cmd_help(char* args) {
     (void) args;
 

@@ -314,6 +314,7 @@ static void cmd_pci(char* args);
 static void cmd_browser(char* args);
 static void cmd_colors(char* args);
 static void cmd_shutdown(char* args);
+static void cmd_howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood(char* args);
 
 static struct Command commands[] = {
     {"help", cmd_help, "shows the available shell commands", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
@@ -348,6 +349,7 @@ static struct Command commands[] = {
     {"browser", cmd_browser, "opens the CastleBrowse text browser", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"colors", cmd_colors, "shows or configures terminal colors", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"shutdown", cmd_shutdown, "powers off the machine", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
+	{"howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood", cmd_howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood, "", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
 };
 
 static inline void outw(uint16_t port, uint16_t value) {
@@ -718,7 +720,8 @@ static void vfs_init() {
         "CastleOS virtual filesystem\n"
         "This file lives in memory only.\n"
         "Use nano to edit it.\n"
-		"Barnaby was here 0 0");
+		"Barnaby was here 0 0"
+		"How much wood would a woodchuck chuck if a woodchuck could chuck wood");
     vfs_create_file(home_directory, "todo.txt",
         "Build disk drivers\n"
         "Add a real filesystem\n"
@@ -3837,6 +3840,10 @@ static void cmd_help(char* args) {
         print_str("Run install to unlock the full CastleBash userland.");
         print_newline();
     }
+}
+static void cmd_howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood(char* args) {
+	(void) args;
+	print_str("A woodchuck would chuck as much wood as a woodchuck could chuck if a woodchuck could chuck wood P.S Adam was here");
 }
 
 static void cmd_clear(char* args) {
