@@ -315,6 +315,8 @@ static void cmd_browser(char* args);
 static void cmd_colors(char* args);
 static void cmd_shutdown(char* args);
 static void cmd_howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood(char* args);
+static void cmd_guide();
+static void cmd_quickinstall(char* args);
 
 static struct Command commands[] = {
     {"help", cmd_help, "shows the available shell commands", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
@@ -350,6 +352,8 @@ static struct Command commands[] = {
     {"colors", cmd_colors, "shows or configures terminal colors", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
     {"shutdown", cmd_shutdown, "powers off the machine", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
 	{"howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood", cmd_howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood, "", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH},
+	{"guide", cmd_guide, "A guide for CastleOS command line", COMMAND_SHELL_BASH | COMMAND_REQUIRES_INSTALL},
+	{"quickinstall", cmd_quickinstall, "install with all defaults no input needed pswd is root", COMMAND_SHELL_CLASSIC | COMMAND_SHELL_BASH}
 };
 
 static inline void outw(uint16_t port, uint16_t value) {
@@ -720,7 +724,7 @@ static void vfs_init() {
         "CastleOS virtual filesystem\n"
         "This file lives in memory only.\n"
         "Use nano to edit it.\n"
-		"Barnaby was here 0 0"
+		"Barnaby was here 0 0\n"
 		"How much wood would a woodchuck chuck if a woodchuck could chuck wood");
     vfs_create_file(home_directory, "todo.txt",
         "Build disk drivers\n"
@@ -3843,7 +3847,9 @@ static void cmd_help(char* args) {
 }
 static void cmd_howmuchwoodcouldawoodchuckchuckifawoodchuckcouldchuckwood(char* args) {
 	(void) args;
-	print_str("A woodchuck would chuck as much wood as a woodchuck could chuck if a woodchuck could chuck wood P.S Adam was here");
+	print_str("A woodchuck would chuck as much wood as a woodchuck could chuck if a woodchuck could chuck wood");
+	print_newline();
+	print_str("P.S Adam was here");
 }
 
 static void cmd_clear(char* args) {
@@ -5496,4 +5502,245 @@ void shell_run() {
         print_newline();
         shell_print_prompt();
     }
+}
+static void cmd_guide() {
+    char input[SHELL_INPUT_SIZE];
+	int tutorial_running = 1;
+	int tutorial_step = 0;
+	int onquestion = 0;
+
+	while (tutorial_running) {
+		
+		if (onquestion == 0) {
+			print_str("Hello, Welcome to the CastleOS Guide.");
+			print_newline();
+			print_str("In this guide, you will be taught the basics of the CastleOS command line.");
+			print_newline();
+		}
+		
+
+		while(tutorial_step == 0){
+			onquestion = 1;
+			print_str("First type \"ls\" to list the files or subdir's within your current dir.");
+			print_newline();
+			shell_read_line(input, sizeof(input));
+
+			if (strcmp(input, "ls") == 0) {
+				cmd_ls(0);
+				print_str("Well done you learnt how to use the ls command to display files/subdirs in your current dir.");
+				print_newline();
+				tutorial_step++;
+			}
+			else {
+				print_str("Oops that wasn't right try again.");
+				print_newline();
+			}
+		}
+		while(tutorial_step == 1){
+			onquestion = 1;
+			print_str("Now that you see the files in your current direcotry type \"cat notes.txt\" and see what that does");
+			print_newline();
+			shell_read_line(input, sizeof(input));
+
+			if (strcmp(input, "cat notes.txt") == 0) {
+				print_newline();
+				cmd_cat("notes.txt");
+				print_newline();
+				print_newline();
+				print_str("Well done now you know how to display file content.");
+				print_newline();
+				tutorial_step++;
+			}
+			else {
+				print_str("Oops that wasn't right try again.");
+				print_newline();
+			}
+		}
+		while(tutorial_step == 2){
+			onquestion = 1;
+			print_str("Next do cat todo.txt to display that");
+			print_newline();
+			shell_read_line(input, sizeof(input));
+
+			if (strcmp(input, "cat todo.txt") == 0) {
+				print_newline();
+				cmd_cat("todo.txt");
+				print_newline();
+				print_str("Well done now you know how to display file content.");
+				print_newline();
+				tutorial_step++;
+			}
+			else {
+				print_str("Oops that wasn't right try again.");
+				print_newline();
+			}
+		}
+		while(tutorial_step == 3){
+			onquestion = 1;
+			print_str("Next use nano to edit notes.txt however you want, but make sure to press escape once you have finished edits");
+			print_newline();
+			shell_read_line(input, sizeof(input));
+
+			if (strcmp(input, "nano notes.txt") == 0) {
+				print_newline();
+				cmd_nano("notes.txt");
+				print_newline();
+				print_str("Well done now you know how to edit file content.");
+				print_newline();
+				tutorial_step++;
+				tutorial_running = 0;
+			}
+			else {
+				print_str("Oops that wasn't right try again.");
+				print_newline();
+			}
+		}
+		// while(tutorial_step == 4){
+		// 	onquestion = 1;
+		// 	print_str("Next use nano to edit notes.txt however you want, but make sure to press escape once you have finished edits");
+		// 	print_newline();
+		// 	shell_read_line(input, sizeof(input));
+
+		// 	if (strcmp(input, "nano notes.txt") == 0) {
+		// 		print_newline();
+		// 		cmd_nano("notes.txt");
+		// 		print_newline();
+		// 		print_str("Well done now you know how to edit file content.");
+		// 		print_newline();
+		// 		tutorial_step++;
+		// 	}
+		// 	else {
+		// 		print_str("Oops that wasn't right try again.");
+		// 		print_newline();
+		// 	}
+		// }
+	}
+}
+static void cmd_quickinstall(char* args) {
+    struct InstallTarget* selected_target;
+    int bin_directory;
+    int etc_directory;
+    int profile_file;
+    int network_file;
+    int install_file;
+
+    (void) args;
+
+    copy_string(install_username, sizeof(install_username), "barnaby");
+    copy_string(install_target, sizeof(install_target), "/dev/ram0");
+
+    selected_target = find_install_target(install_target);
+
+    if (!selected_target) {
+        return;
+    }
+
+    os_installed = 1;
+    bash_installed = 1;
+
+    install_password_set = 1;
+    install_password_hash = hash_password("root");
+
+    default_shell_style = SHELL_STYLE_BASH;
+    current_shell_style = default_shell_style;
+
+    bin_directory = vfs_find_child(0, "bin");
+
+    if (bin_directory >= 0 && vfs_find_child(bin_directory, "bash") < 0) {
+        vfs_create_file(bin_directory, "bash", "CastleBash kernel shell\n");
+    }
+
+    etc_directory = vfs_find_child(0, "etc");
+
+    if (etc_directory >= 0) {
+
+        profile_file = vfs_find_child(etc_directory, "profile");
+
+        if (profile_file >= 0) {
+
+            copy_string(
+                vfs_nodes[profile_file].content,
+                sizeof(vfs_nodes[profile_file].content),
+                "shell=bash\n"
+            );
+
+            vfs_nodes[profile_file].size =
+                str_length(vfs_nodes[profile_file].content);
+        }
+
+        network_file = vfs_find_child(etc_directory, "network.conf");
+
+        if (network_file >= 0) {
+
+            copy_string(
+                vfs_nodes[network_file].content,
+                sizeof(vfs_nodes[network_file].content),
+                "mode=dhcp\n"
+            );
+
+            vfs_nodes[network_file].size =
+                str_length(vfs_nodes[network_file].content);
+        }
+
+        install_file = vfs_find_child(etc_directory, "install.conf");
+
+        if (install_file < 0) {
+            install_file = vfs_create_file(
+                etc_directory,
+                "install.conf",
+                ""
+            );
+        }
+
+        if (install_file >= 0) {
+
+            copy_string(
+                vfs_nodes[install_file].content,
+                sizeof(vfs_nodes[install_file].content),
+                "target="
+            );
+
+            append_string(
+                vfs_nodes[install_file].content,
+                sizeof(vfs_nodes[install_file].content),
+                install_target
+            );
+
+            append_string(
+                vfs_nodes[install_file].content,
+                sizeof(vfs_nodes[install_file].content),
+                "\npassword_hash=set\n"
+            );
+
+            vfs_nodes[install_file].size =
+                str_length(vfs_nodes[install_file].content);
+        }
+    }
+
+    copy_string(
+        ssh_remote_user,
+        sizeof(ssh_remote_user),
+        install_username
+    );
+
+    persist_ssh_configuration();
+
+    autoselect_install_drivers('1');
+
+    network_enable_dhcp();
+
+    if (!write_install_image(
+        selected_target,
+        '1',
+        "10.0.2.15",
+        "255.255.255.0",
+        "10.0.2.2",
+        ""
+    )) {
+        return;
+    }
+
+    print_clear();
+    print_str("CastleOS installed");
+    print_newline();
 }
